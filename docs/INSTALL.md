@@ -1,4 +1,4 @@
-# Universal Inpaint 0.1.0 — portable installation
+# Universal Inpaint 0.1.1 — portable installation
 
 This repository is a ComfyUI custom-node package. The supported CPU starting
 point is the editor profile; generation profiles are opt-in and never replace
@@ -110,7 +110,7 @@ python -m pytest --import-mode=importlib -q tests/test_setup.py tests/test_model
 
 `check` reports interpreter discovery, native H3 module presence and profile
 metadata. It is a capability report, not visual or GPU acceptance. No clean H3
-end-to-end render is claimed by this public 0.1.0 release.
+end-to-end render is claimed by this public 0.1.1 release.
 
 For Windows portable without a `python` command, replace it with
 `& "../../../python_embeded/python.exe"` from the checkout directory.

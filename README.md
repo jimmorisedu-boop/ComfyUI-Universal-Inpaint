@@ -105,5 +105,5 @@ for the direct-loader import smoke test and contribution boundaries.
 - Product: **Universal Inpaint**
 - Maintainer: **jimmorisedu-boop**
 - Repository: [jimmorisedu-boop/ComfyUI-Universal-Inpaint](https://github.com/jimmorisedu-boop/ComfyUI-Universal-Inpaint)
-- Version: **0.1.0**
+- Version: **0.1.1**
 - License: **GPL-3.0-only** (`LICENSE`)

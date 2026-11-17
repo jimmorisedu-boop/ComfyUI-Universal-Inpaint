@@ -21,7 +21,7 @@ const MAX_POINTS_PER_STROKE = 4096;
 const MAX_TOTAL_POINTS = 65536;
 const MAX_PREVIEWS = 48;
 const MAX_HISTORY = 80;
-const EDITOR_BUILD = "20261117-r10d-sam3-video-ui";
+const EDITOR_BUILD = "20261118-r11-inspector-layout";
 
 // A bounded, local flight recorder. Callers pass only explicit diagnostic
 // fields: never the prompt, mask document, image URLs or image buffers.
@@ -271,12 +271,6 @@ function button(label, kind = "neutral") {
     element.textContent = label;
     element.className = `ths-mask-button ths-mask-button-${kind}`;
     element.setAttribute("aria-label", label);
-    Object.assign(element.style, {
-        minHeight: "32px", padding: "5px 9px", border: `1px solid ${COLORS.border}`,
-        borderRadius: "5px", background: kind === "primary" ? COLORS.accent : COLORS.panel2,
-        color: kind === "primary" ? COLORS.accentText : kind === "danger" ? COLORS.danger : COLORS.text, cursor: "pointer", font: "600 12px/1.2 Inter, Arial, sans-serif",
-        whiteSpace: "nowrap", transition: "background-color 120ms ease, border-color 120ms ease, transform 100ms ease",
-    });
     return element;
 }
 
@@ -330,16 +324,12 @@ function setButtonIcon(element, name, label, tooltip = label) {
 function iconButton(label, name, tooltip = label, kind = "neutral") {
     const element = button(label, kind);
     element.className += " ths-mask-icon-button";
-    Object.assign(element.style, { display: "inline-flex", alignItems: "center", justifyContent: "center", width: "40px", minWidth: "40px", height: "40px", padding: "8px", flexShrink: "0", position: "relative" });
     setButtonIcon(element, name, label, tooltip);
     return element;
 }
 
 function labelControl(labelText, control, readout = null) {
-    const wrapper = createElement("label", {
-        display: "inline-flex", alignItems: "center", gap: "6px", color: COLORS.muted,
-        font: "500 12px/1.2 Inter, Arial, sans-serif", minHeight: "28px",
-    }, "ths-mask-label");
+    const wrapper = createElement("label", {}, "ths-mask-label");
     const text = document.createElement("span");
     text.textContent = labelText;
     wrapper.append(text, control);
@@ -348,55 +338,86 @@ function labelControl(labelText, control, readout = null) {
 }
 
 function addStyles(root) {
-    // Keep the module portable: inline styles are used for Comfy's shadowless
-    // widget host, while these class rules cover focus and responsive details.
     const style = document.createElement("style");
     style.textContent = `
-      html:has(dialog.ths-mask-dialog[open]), body:has(dialog.ths-mask-dialog[open]) { overflow: hidden !important; }
-      .ths-mask-editor { font-family: Inter, Arial, sans-serif; font-size: 13px; color: ${COLORS.text}; }
-      .ths-mask-editor button:hover { border-color: ${COLORS.accentStrong} !important; background: ${COLORS.hover} !important; color: var(--content-hover-fg, var(--input-text, #ddd)) !important; }
-      .ths-mask-editor .ths-mask-button-primary:hover { background: color-mix(in srgb, ${COLORS.accent} 88%, white) !important; color: ${COLORS.accentText} !important; }
-      .ths-mask-editor button:active { transform: scale(.97); }
-      .ths-mask-editor button:disabled { opacity: .38; cursor: default; }
-      .ths-mask-editor button:disabled:hover { background: ${COLORS.panel2} !important; border-color: ${COLORS.border} !important; }
-      .ths-mask-editor button:focus-visible, .ths-mask-editor input:focus-visible, .ths-mask-editor select:focus-visible { outline: 2px solid ${COLORS.accentStrong}; outline-offset: 1px; }
-      .ths-mask-editor input, .ths-mask-editor select { accent-color: ${COLORS.accent}; }
-      .ths-mask-editor input[type=number], .ths-mask-editor select { background: ${COLORS.input}; color: ${COLORS.text}; border: 1px solid ${COLORS.border}; border-radius: 4px; min-height: 28px; padding: 3px 6px; box-sizing: border-box; }
-      .ths-mask-editor dialog { position: fixed; inset: 0; margin: 0; color: ${COLORS.text}; background: ${COLORS.panel}; border: 0; border-radius: 0; padding: 8px; width: 100%; height: 100vh; height: 100dvh; max-width: none; max-height: none; box-sizing: border-box; overflow: hidden; box-shadow: none; transform: none; }
-      .ths-mask-editor dialog[open] { display: flex; flex-direction: column; gap: 4px; }
-      .ths-mask-editor .ths-mask-dialog-inner { flex: 1 1 0; min-height: 0; min-width: 0; overflow: auto !important; }
-      .ths-mask-editor .ths-mask-dialog-inner .ths-mask-workbench { height: 100%; min-width: 0; gap: 4px !important; }
-      .ths-mask-editor .ths-mask-dialog-inner .ths-mask-workbench > * { flex-shrink: 0; }
-      .ths-mask-editor .ths-mask-dialog-inner .ths-canvas-wrap { flex: 1 1 0 !important; height: auto !important; min-height: 80px !important; resize: none !important; }
-      .ths-mask-editor .ths-mask-dialog-inner details { max-height: 25vh; min-height: 24px; flex-shrink: 1; overflow: auto; }
-      .ths-mask-editor .ths-mask-workbench { min-height: 0; }
-      .ths-mask-editor .ths-mask-status { box-sizing: border-box; }
-      .ths-mask-editor details { border-top: 1px solid ${COLORS.borderSoft}; padding-top: 4px; }
-      .ths-mask-editor summary { cursor: pointer; color: ${COLORS.muted}; font: 600 11px/1.2 Inter, Arial, sans-serif; padding: 3px 0; }
-      .ths-mask-editor dialog::backdrop { background: rgba(4,7,10,.76); }
-      .ths-mask-editor .ths-key-marker { width: 10px; height: 18px; min-height: 18px; padding: 0; border: 0; border-radius: 2px; background: transparent; position: absolute; top: -2px; transform: translateX(-50%); }
-      .ths-mask-editor .ths-key-marker::before { content: ''; display: block; width: 3px; height: 14px; margin: 2px auto; border-radius: 1px; background: ${COLORS.mask}; }
-      .ths-mask-editor .ths-muted { color: ${COLORS.muted}; }
-      .ths-mask-editor .ths-mask-settings { padding: 4px 0; }
-      .ths-mask-editor .ths-mask-settings label { gap: 8px !important; white-space: nowrap; }
-      .ths-mask-editor .ths-mask-settings input { font-variant-numeric: tabular-nums; }
-      .ths-mask-editor dialog .ths-mask-button { min-height: 28px !important; padding: 4px 8px !important; }
-      .ths-mask-editor dialog .ths-mask-icon-button { width: 32px !important; min-width: 32px !important; height: 32px !important; min-height: 32px !important; padding: 5px !important; }
-      .ths-mask-editor dialog .ths-mask-icon-button svg { width: 18px; height: 18px; }
-      .ths-mask-editor dialog .ths-mask-settings { padding: 0; gap: 10px !important; }
-      .ths-mask-editor dialog .ths-mask-settings label { gap: 4px !important; }
-      .ths-mask-editor dialog .ths-mask-settings input { width: 52px !important; }
-      .ths-mask-editor dialog .ths-mask-tools { padding: 2px 0 !important; gap: 4px !important; }
-      .ths-mask-editor dialog .ths-mask-timeline { gap: 2px !important; padding-top: 2px !important; }
-      .ths-mask-editor dialog .ths-mask-dialog-bar > strong { flex-shrink: 0; }
-      .ths-mask-editor dialog .ths-mask-dialog-bar .ths-mask-status { flex: 1 1 0; min-width: 0; min-height: 0 !important; max-height: 44px; overflow: auto; padding: 0 4px !important; background: transparent !important; }
-      .ths-mask-editor dialog .ths-mask-dialog-bar .ths-mask-actions { flex-wrap: wrap !important; gap: 4px !important; padding: 0 !important; min-width: 0; max-width: 100%; overflow-x: auto; }
-      .ths-mask-editor dialog .ths-mask-dialog-bar .ths-mask-queue-hint { display: none; }
-      @media (prefers-reduced-motion: reduce) { .ths-mask-editor button { transition: none !important; } .ths-mask-editor button:active { transform: none; } }
-      @media (max-width: 640px) {
-        .ths-mask-editor dialog .ths-mask-dialog-bar { flex-wrap: wrap; }
-        .ths-mask-editor dialog .ths-mask-dialog-bar .ths-mask-status { flex-basis: 50%; }
+      .ths-mask-editor { font: 13px/1.45 Inter, system-ui, sans-serif; color: ${COLORS.text}; container: mask-editor / inline-size; }
+      .ths-mask-editor .ths-mask-button { min-height: 36px; padding: 8px 12px; border: 1px solid ${COLORS.border}; border-radius: 6px; background: ${COLORS.panel2}; color: ${COLORS.text}; cursor: pointer; font: 500 13px/1.3 Inter, system-ui, sans-serif; white-space: nowrap; transition: background-color 120ms ease, border-color 120ms ease; }
+      .ths-mask-editor .ths-mask-button-primary { background: ${COLORS.accent}; color: ${COLORS.accentText}; border-color: transparent; }
+      .ths-mask-editor .ths-mask-button-danger { color: ${COLORS.danger}; }
+      .ths-mask-editor button:hover:not(:disabled) { border-color: ${COLORS.accentStrong}; filter: brightness(1.12); }
+      .ths-mask-editor button:disabled { opacity: .45; cursor: default; }
+      .ths-mask-editor :is(button,input,select,summary):focus-visible { outline: 2px solid ${COLORS.accentStrong}; outline-offset: 3px; }
+      .ths-mask-editor :is(input,select) { accent-color: ${COLORS.accent}; font: inherit; }
+      .ths-mask-editor :is(input[type=number],select) { background: ${COLORS.input}; color: ${COLORS.text}; border: 1px solid ${COLORS.border}; border-radius: 5px; min-height: 34px; padding: 6px 8px; box-sizing: border-box; min-width: 0; }
+      .ths-mask-editor .ths-mask-icon-button { display: inline-flex; align-items: center; justify-content: center; width: 38px; min-width: 38px; height: 38px; min-height: 38px; padding: 8px; flex: none; position: relative; }
+      .ths-mask-editor .ths-mask-label { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; color: ${COLORS.muted}; font-size: 12px; line-height: 1.4; }
+      .ths-mask-editor .ths-mask-header { display: flex; align-items: center; gap: 16px; min-height: 40px; }
+      .ths-mask-editor .ths-mask-header > :nth-child(2) { margin-inline-start: auto; min-width: 0; overflow: hidden; }
+      .ths-mask-editor .ths-mask-workbench { display: grid; grid-template-rows: auto minmax(0,1fr); gap: 12px; height: 650px; min-width: 0; min-height: 0; }
+      .ths-mask-editor .ths-mask-status { box-sizing: border-box; min-height: 36px; padding: 9px 12px; border-radius: 5px; background: ${COLORS.panel2}; font-size: 12px; line-height: 1.5; }
+      .ths-mask-editor .ths-mask-status-area { display: grid; gap: 8px; }
+      .ths-mask-editor .ths-mask-workspace { display: grid; grid-template-columns: minmax(0,1fr) 296px; gap: 16px; min-height: 0; min-width: 0; }
+      .ths-mask-editor .ths-mask-viewer { display: grid; grid-template-rows: auto minmax(220px,1fr) auto; gap: 10px; min-width: 0; min-height: 0; }
+      .ths-mask-editor .ths-mask-viewbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+      .ths-mask-editor .ths-mask-viewbar .ths-mask-button { min-height: 32px; padding: 6px 10px; font-size: 12px; }
+      .ths-mask-editor .ths-mask-viewbar .ths-mask-icon-button { width: 32px; min-width: 32px; height: 32px; padding: 6px; }
+      .ths-mask-editor .ths-mask-viewbar > :last-child { margin-inline-start: auto; }
+      .ths-mask-editor .ths-mask-canvas-area { display: grid; grid-template-columns: 42px minmax(0,1fr); gap: 8px; min-width: 0; min-height: 0; }
+      .ths-mask-editor .ths-mask-tools { display: flex; flex-direction: column; align-items: center; gap: 6px; padding-block: 4px; }
+      .ths-mask-editor .ths-mask-tools > :nth-child(5) { margin-block-start: 12px; }
+      .ths-mask-editor .ths-canvas-wrap { position: relative; min-width: 0; min-height: 220px; background: ${COLORS.panel}; border: 1px solid ${COLORS.borderSoft}; border-radius: 6px; overflow: hidden; }
+      .ths-mask-editor .ths-mask-inspector { min-width: 0; min-height: 0; overflow: hidden; background: ${COLORS.panel}; border: 1px solid ${COLORS.borderSoft}; border-radius: 7px; display: flex; flex-direction: column; }
+      .ths-mask-editor .ths-mask-inspector-body { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+      .ths-mask-editor .ths-mask-export { flex: none; padding: 12px 16px; border-top: 1px solid ${COLORS.borderSoft}; }
+      .ths-mask-editor .ths-mask-section { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+      .ths-mask-editor .ths-mask-section + .ths-mask-section { border-top: 1px solid ${COLORS.borderSoft}; padding-block-start: 12px; }
+      .ths-mask-editor .ths-mask-section-title { margin: 0; color: ${COLORS.text}; font-size: 13px; line-height: 1.4; font-weight: 650; }
+      .ths-mask-editor .ths-mask-section-copy { margin: 0; color: ${COLORS.muted}; font-size: 12px; line-height: 1.5; }
+      .ths-mask-editor .ths-mask-inspector .ths-mask-label { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 8px; }
+      .ths-mask-editor .ths-mask-mode { display: flex !important; flex-direction: column; align-items: stretch; gap: 6px !important; }
+      .ths-mask-editor .ths-mask-mode select { width: 100%; }
+      .ths-mask-editor .ths-mask-settings { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .ths-mask-editor .ths-mask-settings .ths-mask-label { display: flex; flex-wrap: wrap; gap: 6px; }
+      .ths-mask-editor .ths-mask-settings .ths-mask-label > :first-child { width: 100%; }
+      .ths-mask-editor .ths-mask-settings input { width: 68px; font-variant-numeric: tabular-nums; }
+      .ths-mask-editor .ths-mask-actions { display: flex; flex-direction: column; gap: 8px; }
+      .ths-mask-editor .ths-mask-actions .ths-mask-button-primary { background: ${COLORS.panel2}; color: ${COLORS.text}; border-color: ${COLORS.border}; }
+      .ths-mask-editor .ths-mask-export button[data-next-action=true] { background: ${COLORS.accent}; color: ${COLORS.accentText}; border-color: transparent; }
+      .ths-mask-editor .ths-mask-export > .ths-mask-button { margin-block-start: 4px; }
+      .ths-mask-editor .ths-mask-actions button, .ths-mask-editor .ths-mask-export button { width: 100%; align-items: center; justify-content: center; }
+      .ths-mask-editor .ths-mask-queue-hint { color: ${COLORS.muted}; font-size: 12px; line-height: 1.5; }
+      .ths-mask-editor .ths-mask-range { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: ${COLORS.muted}; font-size: 12px; }
+      .ths-mask-editor .ths-mask-range input { width: 70px; }
+      .ths-mask-editor .ths-mask-range > :last-child { width: 100%; }
+      .ths-mask-editor .ths-mask-timeline { display: flex; flex-direction: column; gap: 10px; padding: 12px; border: 1px solid ${COLORS.borderSoft}; border-radius: 6px; background: ${COLORS.panel}; min-width: 0; }
+      .ths-mask-editor .ths-mask-transport { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+      .ths-mask-editor .ths-mask-transport .ths-mask-icon-button { width: 32px; min-width: 32px; height: 32px; min-height: 32px; padding: 6px; }
+      .ths-mask-editor .ths-mask-transport .ths-mask-icon-button svg { width: 18px; height: 18px; }
+      .ths-mask-editor .ths-mask-secondary { display: flex; flex-wrap: wrap; gap: 6px; }
+      .ths-mask-editor .ths-mask-secondary .ths-mask-button { font-size: 11px; padding: 6px 8px; min-height: 30px; }
+      .ths-mask-editor .ths-key-marker { width: 14px; height: 22px; min-height: 22px; padding: 0; border: 0; border-radius: 2px; background: transparent; position: absolute; top: -4px; transform: translateX(-50%); }
+      .ths-mask-editor .ths-key-marker::before { content: ''; display: block; width: 3px; height: 14px; margin: 4px auto; border-radius: 1px; background: ${COLORS.mask}; }
+      .ths-mask-editor details { color: ${COLORS.muted}; font-size: 12px; }
+      .ths-mask-editor summary { cursor: pointer; padding-block: 4px; }
+      .ths-mask-editor .ths-mask-dialog { position: fixed; inset: 0; margin: 0; color: ${COLORS.text}; background: ${COLORS.page}; border: 0; border-radius: 0; padding: 16px 20px; width: 100%; height: 100vh; height: 100dvh; max-width: none; max-height: none; box-sizing: border-box; overflow: hidden; box-shadow: none; transform: none; }
+      .ths-mask-editor .ths-mask-dialog[open] { display: flex; flex-direction: column; gap: 12px; }
+      .ths-mask-editor .ths-mask-dialog:modal { overscroll-behavior: contain; }
+      .ths-mask-editor .ths-mask-dialog::backdrop { background: rgba(0,0,0,.72); overflow: hidden; overscroll-behavior: contain; }
+      .ths-mask-editor .ths-mask-dialog-bar { display: flex; align-items: center; gap: 12px; min-height: 40px; flex: none; }
+      .ths-mask-editor .ths-mask-dialog-bar > :nth-child(2) { margin-inline-start: auto; min-width: 0; overflow: hidden; }
+      .ths-mask-editor .ths-mask-dialog-inner { flex: 1 1 0; min-height: 0; min-width: 0; container: mask-editor / inline-size; }
+      .ths-mask-editor .ths-mask-dialog-inner .ths-mask-workbench { height: 100%; grid-template-rows: auto minmax(0,1fr); }
+      .ths-mask-editor .ths-mask-dialog-inner .ths-canvas-wrap { min-height: 80px; }
+      @container mask-editor (max-width: 760px) {
+        .ths-mask-editor .ths-mask-workspace { grid-template-columns: minmax(0,1fr); }
+        .ths-mask-editor .ths-mask-workbench { grid-template-rows: auto auto; height: auto; }
+        .ths-mask-editor .ths-mask-viewer { min-height: 420px; }
+        .ths-mask-editor .ths-mask-inspector { overflow: visible; }
+        .ths-mask-editor .ths-mask-inspector-body { overflow: visible; flex: none; }
+        .ths-mask-editor .ths-mask-dialog-inner { overflow-y: auto; overscroll-behavior: contain; }
+        .ths-mask-editor .ths-mask-dialog-inner .ths-mask-workbench { height: auto; grid-template-rows: auto auto; }
       }
+      @media (prefers-reduced-motion: reduce) { .ths-mask-editor button { transition: none; } }
     `;
     root.append(style);
 }
@@ -507,13 +528,14 @@ export function createUniversalMaskEditor(node, options = {}) {
     const maskSettingsGroup = createElement("div", { display: "inline-flex", alignItems: "center", flexWrap: "wrap", gap: "12px" }, "ths-mask-settings");
     maskSettingsGroup.setAttribute("role", "group");
     maskSettingsGroup.setAttribute("aria-label", "Настройки маски");
-    maskSettingsGroup.append(labelControl("Режим", modeSelect));
+    const modeLabel = labelControl("Режим", modeSelect);
+    modeLabel.className += " ths-mask-mode";
     const directionSelect = document.createElement("select");
     for (const [value, text] of [["forward", "вперёд"], ["backward", "назад"], ["both", "оба"]]) { const option = document.createElement("option"); option.value = value; option.textContent = text; directionSelect.append(option); }
     directionSelect.setAttribute("aria-label", "Направление");
     directionSelect.title = "Направление трекинга SAM3; диапазон задаётся ниже";
     const directionLabel = labelControl("Направление", directionSelect);
-    maskSettingsGroup.append(directionLabel);
+
     const maskSettingsInputs = {};
     const maskSettingsDefaults = { grow: 8, feather: 4 };
     for (const [name, label, description] of [["grow", "Grow", "Расширение маски"], ["feather", "Feather", "Растушёвка края маски"]]) {
@@ -583,7 +605,9 @@ export function createUniversalMaskEditor(node, options = {}) {
     const endInput = document.createElement("input"); endInput.type = "number"; endInput.min = "1"; endInput.value = "1"; endInput.style.width = "59px"; endInput.setAttribute("aria-label", "Конец диапазона");
     const endInfinity = createElement("span", { color: COLORS.muted }); endInfinity.textContent = "до конца";
     const fpsReadout = document.createElement("span");
-    rangeRow.append(document.createTextNode?.("Диапазон") || "Диапазон", startInput, document.createTextNode?.("—") || "—", endInput, endInfinity, fpsReadout);
+    const rangeLabel = createElement("span"); rangeLabel.textContent = "Кадры";
+    const rangeDash = createElement("span"); rangeDash.textContent = "—";
+    rangeRow.append(rangeLabel, startInput, rangeDash, endInput, endInfinity, fpsReadout);
     root.append(rangeRow);
 
     const actionButtons = createElement("div", { display: "flex", alignItems: "center", flexWrap: "wrap", gap: "7px", paddingTop: "2px" }, "ths-mask-actions");
@@ -618,17 +642,76 @@ export function createUniversalMaskEditor(node, options = {}) {
     // the wrapper (rather than only the canvas) keeps navigation, tools and
     // actions available while the large viewer is open.
     const workbenchPlaceholder = createElement("span", { display: "none" });
-    const statusPlaceholder = createElement("span", { display: "none" });
-    const workbench = createElement("div", { display: "flex", flexDirection: "column", gap: "8px", width: "100%", minHeight: "0" }, "ths-mask-workbench");
-    workbench.append(statusPlaceholder, status, recoveryActions, canvasWrap, canvasPlaceholder, viewRow, toolPanel, settingsRow, timeline, actionRow, rangeRow, advanced, actionButtons);
+
+    // A single DOM tree is shared by inline and fullscreen views. Only its
+    // outer wrapper moves; controls retain position, state and event handlers.
+    function restyle(element, className) {
+        element.removeAttribute?.("style");
+        if (className) element.className = className;
+        return element;
+    }
+    function section(label, className = "") {
+        const element = createElement("section", {}, `ths-mask-section ${className}`);
+        element.setAttribute("aria-label", label);
+        const heading = createElement("h3", {}, "ths-mask-section-title");
+        heading.textContent = label; element.append(heading); return element;
+    }
+    restyle(header, "ths-mask-header");
+    restyle(status, "ths-mask-status");
+    restyle(viewRow, "ths-mask-viewbar");
+    restyle(toolPanel, "ths-mask-tools");
+    restyle(canvasWrap, "ths-canvas-wrap");
+    restyle(timeline, "ths-mask-timeline");
+    restyle(navRow, "ths-mask-transport");
+    restyle(actionRow, "ths-mask-secondary");
+    restyle(rangeRow, "ths-mask-range");
+    restyle(actionButtons, "ths-mask-actions");
+    restyle(maskSettingsGroup, "ths-mask-settings");
+    restyle(queueHint, "ths-mask-queue-hint");
+    const selectionPanel = section("1. Выделение");
+    const modeHint = createElement("p", {}, "ths-mask-section-copy");
+    selectionPanel.append(modeLabel, modeHint);
+    const edgesPanel = section("2. Настройки маски");
+    edgesPanel.append(maskSettingsGroup, brushLabel, refine, refineMethodLabel);
+    const trackingPanel = section("3. Диапазон трекинга");
+    trackingPanel.append(directionLabel, rangeRow);
+    timelineLine.append(fpsReadout);
+    const exportPanel = section("Расчёт", "ths-mask-export");
+    exportPanel.append(actionButtons, queue, queueHint);
+    const editPanel = section("Правки кадра");
+    editPanel.append(actionRow, advanced);
+    const inspector = createElement("aside", {}, "ths-mask-inspector");
+    inspector.setAttribute("aria-label", "Настройки маски и расчёт");
+    const inspectorBody = createElement("div", {}, "ths-mask-inspector-body");
+    inspectorBody.append(selectionPanel, edgesPanel, trackingPanel, editPanel);
+    inspector.append(inspectorBody, exportPanel);
+    viewRow.append(zoomGroup);
+    toolPanel.append(tools.brush, tools.erase, tools.rect, tools.polygon, undo, redo);
+    toolPanel.setAttribute("role", "toolbar");
+    toolPanel.setAttribute("aria-label", "Инструменты рисования");
+    const canvasArea = createElement("div", {}, "ths-mask-canvas-area");
+    canvasArea.append(toolPanel, canvasWrap);
+    const viewer = createElement("div", {}, "ths-mask-viewer");
+    viewer.append(viewRow, canvasArea, timeline);
+    const workspace = createElement("div", {}, "ths-mask-workspace");
+    workspace.append(viewer, inspector);
+    const statusArea = createElement("div", {}, "ths-mask-status-area");
+    statusArea.append(status, recoveryActions);
+    const workbench = createElement("div", {}, "ths-mask-workbench");
+    workbench.append(statusArea, workspace);
+    // Remove obsolete empty row wrappers after moving their children.
+    settingsRow.remove?.(); canvasPlaceholder.remove?.();
     root.append(workbenchPlaceholder, workbench);
 
     const dialog = document.createElement("dialog");
     dialog.className = "ths-mask-dialog";
-    const dialogBar = createElement("div", { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", flexShrink: "0" }, "ths-mask-dialog-bar");
-    const dialogTitle = createElement("strong", { font: "600 13px/1.2 Inter, Arial, sans-serif" }); dialogTitle.textContent = "Маска видео";
-    const closeDialogButton = iconButton("Закрыть", "close", "Закрыть редактор · Esc"); dialogBar.append(dialogTitle, closeDialogButton);
-    const dialogInner = createElement("div", { display: "flex", flexDirection: "column", gap: "8px", flex: "1 1 0", minHeight: "0", overflow: "hidden" }, "ths-mask-dialog-inner");
+    dialog.setAttribute("aria-label", "Редактор маски видео — большой экран");
+    const dialogBar = createElement("div", {}, "ths-mask-dialog-bar");
+    const dialogTitle = createElement("strong"); dialogTitle.textContent = "Маска видео";
+    const closeDialogButton = iconButton("Закрыть", "close", "Закрыть редактор · Esc");
+    closeDialogButton.setAttribute("autofocus", "");
+    dialogBar.append(dialogTitle, closeDialogButton);
+    const dialogInner = createElement("div", {}, "ths-mask-dialog-inner");
     dialog.append(dialogBar, dialogInner);
     root.append(dialog);
 
@@ -807,8 +890,13 @@ export function createUniversalMaskEditor(node, options = {}) {
 
     function updateActionAvailability() {
         const modeIsSam3 = sam3Mode();
+        modeHint.textContent = modeIsSam3 ? "Рамка вокруг объекта → маска кадра → трекинг видео." : safeMode(node, documentState) === "optical_flow" ? "Нарисуйте область. Optical Flow перенесёт её по движению." : safeMode(node, documentState) === "keyframes" ? "Маски ближайших ручных ключей, без расчёта движения." : "Одна неподвижная маска для всего диапазона.";
         const frameReady = sam3FrameReady();
         const trackReady = sam3TrackReady();
+        calculateFrame.setAttribute("data-next-action", String(modeIsSam3 && !frameReady));
+        trackVideo.setAttribute("data-next-action", String(modeIsSam3 && frameReady && !trackReady));
+        prepare.setAttribute("data-next-action", String(!modeIsSam3));
+        queue.setAttribute("data-next-action", String(modeIsSam3 && trackReady));
         queue.disabled = Boolean(actionBlocked() || state.pendingH3 || (modeIsSam3 && !trackReady));
         const sam3Pending = Boolean(state.pendingPreview && String(state.pendingPreview.kind || "").startsWith("sam3_"));
         const sourceLoaded = Boolean(state.source) || state.frameItems.size > 0;
@@ -2067,8 +2155,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         state.dialogReturnFocus = document.activeElement || expand;
         state.dialogOpen = true;
         dialogInner.append(workbench);
-        dialogBar.append(status, actionButtons, debugDownload, closeDialogButton);
-        canvasWrap.style.height = "auto"; canvasWrap.style.minHeight = "80px"; canvasWrap.style.flex = "1 1 0"; canvasWrap.style.resize = "none";
+        dialogBar.append(headerMeta, debugDownload, closeDialogButton);
         dialog.showModal?.(); if (!dialog.showModal) dialog.setAttribute("open", "");
         closeDialogButton.focus?.(); draw();
         diagnostics.record("dialog.open", { layout: layoutSnapshot() });
@@ -2076,11 +2163,9 @@ export function createUniversalMaskEditor(node, options = {}) {
     function closeDialog() {
         if (!state.dialogOpen) return;
         state.dialogOpen = false; stopPlayback(); cancelGesture(); state.lastPointer = null; brushCursor.style.display = "none";
-        if (statusPlaceholder.parentNode && statusPlaceholder.after) statusPlaceholder.after(status); else workbench.append(status);
-        workbench.append(actionButtons);
+        header.append(headerMeta, headerActions);
         headerActions.append(debugDownload, expand);
         if (workbenchPlaceholder.parentNode && workbenchPlaceholder.after) workbenchPlaceholder.after(workbench); else root.append(workbench);
-        canvasWrap.style.height = "clamp(210px, 32vw, 340px)"; canvasWrap.style.minHeight = "190px"; canvasWrap.style.flex = "0 0 auto"; canvasWrap.style.resize = "vertical";
         dialog.close?.(); dialog.removeAttribute?.("open");
         (state.dialogReturnFocus || expand)?.focus?.(); state.dialogReturnFocus = null; draw();
         diagnostics.record("dialog.close", { layout: layoutSnapshot() });
@@ -2163,7 +2248,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         diagnostics.record("editor.destroyed"); diagnostics.dispose();
     }
     window.addEventListener?.("resize", draw);
-    node.addDOMWidget?.("universal_mask_editor", "THSUniversalMaskEditor", root, { serialize: false, getMinHeight: () => 560, getMaxHeight: () => 900 });
+    node.addDOMWidget?.("universal_mask_editor", "THSUniversalMaskEditor", root, { serialize: false, getMinHeight: () => 740, getMaxHeight: () => 1100 });
     const editor = { root, canvas, status, applyExecuted, handleRuntimeEvent: runtimeEvent, setFrame, commit, syncFromConfiguredWidget, destroy, loadFrame, ingestOutput, debugReport: diagnostics.report, get state() { return state; }, get document() { return documentState; } };
     node.__thsUniversalMaskEditor = editor;
     if (!node.__thsUniversalMaskConfigureSync) {
