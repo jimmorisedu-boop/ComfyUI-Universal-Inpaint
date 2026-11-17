@@ -25,7 +25,7 @@ import hashlib
 import json
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import shutil
 import subprocess
 import sys
@@ -108,11 +108,11 @@ def validate_relative_path(relative: str | os.PathLike[str], *, label: str = "pa
     # destination.  Check the raw spelling as well as pathlib's platform
     # interpretation.
     normalized_parts = [part for part in raw.replace("\\", "/").split("/") if part]
-    if not raw or candidate.is_absolute() or candidate.drive or raw.startswith(("/", "\\")):
+    if not raw or candidate.is_absolute() or PureWindowsPath(raw).drive or raw.startswith(("/", "\\")):
         raise SetupError(f"{label} must be a relative path: {raw!r}")
     if any(part in (".", "..") for part in (*candidate.parts, *normalized_parts)):
         raise SetupError(f"{label} contains unsafe traversal: {raw!r}")
-    return candidate
+    return Path(*normalized_parts)
 
 
 def safe_destination(root: Path, relative: str | os.PathLike[str], *, label: str = "destination") -> Path:

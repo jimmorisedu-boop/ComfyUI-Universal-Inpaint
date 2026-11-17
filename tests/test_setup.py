@@ -27,6 +27,10 @@ def test_relative_path_rejects_traversal_and_absolute() -> None:
         setup_tool.validate_relative_path("C:/outside/file")
     with pytest.raises(setup_tool.SetupError):
         setup_tool.validate_relative_path("/absolute/file")
+    for unsafe in ("C:relative/file", "..\\outside\\file", "\\\\server\\share\\file"):
+        with pytest.raises(setup_tool.SetupError):
+            setup_tool.validate_relative_path(unsafe)
+    assert setup_tool.validate_relative_path("models\\sam3\\weights") == Path("models/sam3/weights")
 
 
 def test_detect_root_and_explicit_python(tmp_path: Path) -> None:
