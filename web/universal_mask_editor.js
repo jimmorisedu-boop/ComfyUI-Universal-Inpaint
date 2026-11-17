@@ -21,7 +21,7 @@ const MAX_POINTS_PER_STROKE = 4096;
 const MAX_TOTAL_POINTS = 65536;
 const MAX_PREVIEWS = 48;
 const MAX_HISTORY = 80;
-const EDITOR_BUILD = "20261118-r11-inspector-layout";
+const EDITOR_BUILD = "20261118-r11b-sam3-history";
 
 // A bounded, local flight recorder. Callers pass only explicit diagnostic
 // fields: never the prompt, mask document, image URLs or image buffers.
@@ -1051,6 +1051,10 @@ export function createUniversalMaskEditor(node, options = {}) {
         if (state.mismatchBlocked) { setStatus("Источник не совпадает с сохранённой маской. Сначала примите новый клип или восстановите прежний источник.", "warn"); return false; }
         const entry = state.history[index];
         if (!entry) return false;
+        const approvedSeed = sam3FrameReady() ? {
+            frame: state.sam3.frame, token: state.sam3.seedToken,
+            signature: sam3SeedSignature(state.sam3.frame),
+        } : null;
         const historyAction = index < state.historyIndex ? "Изменение отменено" : "Изменение повторено";
         replaceDocument(documentState, entry.document);
         for (const [name, value] of Object.entries(entry.settings || {})) {
@@ -1076,11 +1080,24 @@ export function createUniversalMaskEditor(node, options = {}) {
             state.sam3.frame = Number.isFinite(Number(documentState.sam3?.frame)) ? Math.max(0, Math.round(Number(documentState.sam3.frame))) : state.sam3.frame;
             state.sam3.seedToken = String(documentState.sam3?.seed_token || state.sam3.seedToken || "");
             state.sam3.direction = sam3Direction(documentState.sam3?.direction || state.sam3.direction);
-            state.sam3.frameReady = false; state.sam3.trackReady = false; state.sam3.frameSignature = ""; state.sam3.trackSignature = "";
+            // History may predate the server's canonical token. Reuse a live
+            // verified seed only when its source, frame and prompt boxes match.
+            // Brush edits/settings require a new track, not a new object seed.
+            const sameSeed = Boolean(approvedSeed && approvedSeed.frame === state.sam3.frame
+                && approvedSeed.signature === sam3SeedSignature(state.sam3.frame));
+            if (sameSeed) {
+                state.sam3.seedToken = approvedSeed.token;
+                documentState.sam3.seed_token = approvedSeed.token;
+            }
+            state.sam3.frameReady = sameSeed; state.sam3.trackReady = false;
+            state.sam3.frameSignature = sameSeed ? sam3ReadinessSignature({ range: false }) : "";
+            state.sam3.trackSignature = "";
+            state.sam3.error = "";
+            state.metadata = { ...state.metadata, sam3: { ...(state.metadata?.sam3 || {}), frame_ready: sameSeed, track_ready: false } };
             directionSelect.value = state.sam3.direction;
         }
         updateReadouts(); draw(); commit({ markDirty: false });
-        setStatus(`${historyAction}. Обновите маску для проверки результата.`, "dirty");
+        setStatus(`${historyAction}. ${sam3FrameReady() ? "Нажмите «Отследить видео», чтобы применить правки." : "Обновите маску для проверки результата."}`, "dirty");
         return true;
     }
 

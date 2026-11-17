@@ -93,6 +93,6 @@ node --test tests/*.test.mjs
 См. [docs/USER_GUIDE_RU.md](docs/USER_GUIDE_RU.md) и
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-Продукт: **Universal Inpaint**, владелец: **jimmorisedu-boop**, версия **0.1.1**.
+Продукт: **Universal Inpaint**, владелец: **jimmorisedu-boop**, версия **0.1.2**.
 Репозиторий:
 [jimmorisedu-boop/ComfyUI-Universal-Inpaint](https://github.com/jimmorisedu-boop/ComfyUI-Universal-Inpaint).

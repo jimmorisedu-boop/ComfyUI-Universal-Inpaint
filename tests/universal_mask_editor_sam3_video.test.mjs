@@ -147,6 +147,36 @@ assert.ok(editor.document.frames["1"].events.some((event) => event.type === "str
 assert.equal(editor.state.sam3.frameReady, true);
 assert.equal(editor.state.sam3.trackReady, false);
 assert.equal(button(editor.root, "Запустить H3").disabled, true);
+// Undo/redo of a correction must keep the approved object seed usable.
+// The full track still needs recalculation before H3 can run.
+const correctedFrames = JSON.stringify(editor.document.frames);
+button(editor.root, "Отменить").click();
+assert.equal(editor.state.sam3.frameReady, true, "undoing a stroke keeps the approved SAM3 seed");
+assert.equal(button(editor.root, "Отследить видео").disabled, false);
+assert.equal(button(editor.root, "Запустить H3").disabled, true);
+button(editor.root, "Повторить").click();
+assert.equal(JSON.stringify(editor.document.frames), correctedFrames);
+assert.equal(editor.state.sam3.frameReady, true, "redoing a stroke keeps the approved SAM3 seed");
+assert.equal(editor.state.sam3.seedToken, backendToken);
+assert.equal(button(editor.root, "Отследить видео").disabled, false);
+const correctedHistoryIndex = editor.state.historyIndex;
+while (editor.state.historyIndex > 1) button(editor.root, "Отменить").click();
+assert.equal(editor.state.sam3.frameReady, true, "history from before frame calculation can reuse the identical live verified seed");
+assert.equal(editor.document.sam3.seed_token, backendToken, "a historical client token never replaces the verified backend token");
+while (editor.state.historyIndex < correctedHistoryIndex) button(editor.root, "Повторить").click();
+assert.equal(JSON.stringify(editor.document.frames), correctedFrames);
+// Changing the actual object prompt revokes the proof. Undo must not invent
+// readiness from an old history token after that revocation.
+editor.setFrame(0, { load: false });
+button(editor.root, "Очистить кадр").click();
+assert.equal(editor.state.sam3.frameReady, false);
+button(editor.root, "Отменить").click();
+assert.equal(editor.state.sam3.frameReady, false, "undo cannot resurrect a revoked seed proof");
+assert.equal(button(editor.root, "Отследить видео").disabled, true);
+button(editor.root, "Рассчитать кадр").click();
+await new Promise((resolve) => setImmediate(resolve));
+await editor.applyExecuted({ prompt_id: editor.state.pendingPreview.promptId, universal_mask_meta: [{ source, has_mask: true, sam3: { frame_ready: true, track_ready: false, frame: 0, seed_token: backendToken, direction: "both", computed_frames: [0] } }] });
+editor.setFrame(1, { load: false });
 button(editor.root, "Отследить видео").click();
 await new Promise((resolve) => setImmediate(resolve));
 const staleTrackPromptId = editor.state.pendingPreview.promptId;

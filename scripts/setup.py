@@ -37,7 +37,7 @@ import urllib.parse
 import urllib.request
 
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEPENDENCIES_PATH = REPO_ROOT / "config" / "dependencies.json"
 MODELS_PATH = REPO_ROOT / "config" / "models.json"

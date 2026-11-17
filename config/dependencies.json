@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "product": "Universal Inpaint",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "python": {
     "minimum": "3.10",
     "note": "Use the ComfyUI portable embedded interpreter or the interpreter that owns the selected ComfyUI venv. The installer never installs or replaces Python, torch, CUDA, xformers, or torchvision."

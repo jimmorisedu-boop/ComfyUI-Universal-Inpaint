@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.2 — SAM3 undo/redo readiness
+
+- Fixed undo/redo of brush corrections unnecessarily discarding the approved
+  SAM3 seed and disabling Track video. A verified seed is retained only when
+  the source, seed frame and object prompt still match.
+- Historical client tokens no longer replace the live verified backend token.
+  Changing or clearing the object prompt still requires a new frame calculation.
+- Added regression coverage for correction history, historical token promotion
+  and refusing to resurrect revoked seed readiness.
+
 ## 0.1.1 — mask editor layout
 
 - Grouped selection, mask settings, tracking range and frame edits in a side

@@ -40,3 +40,7 @@ component width, the inspector moves below the viewer and the dialog body scroll
   alignment after returning to an inline node transformed to 75% scale.
 - These are editor acceptance checks. No new SAM3 inference or H3 render was
   required for this layout change. Private frames and captures are not shipped.
+
+The subsequent [live ComfyUI verification](LIVE_VALIDATION.md) exercised real
+SAM3 and Optical Flow inference after this redesign and fixed SAM3 undo/redo
+readiness in version 0.1.2.
