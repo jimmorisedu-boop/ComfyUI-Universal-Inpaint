@@ -1,0 +1,10 @@
+# kijai/ComfyUI-Florence2 requirements at the pinned revision.
+# No torch line is intentional; ComfyUI's existing torch/CUDA installation is
+# never replaced by this profile.
+transformers>=4.39.0,!=4.50.*
+matplotlib
+timm
+Pillow>=10.2
+peft
+accelerate>=0.26.0
+safetensors

@@ -1,0 +1,4 @@
+# Safe baseline for Universal Inpaint's CPU/editor profile.
+# scripts/setup.py resolves transitive dependencies but rejects any pip plan
+# that would replace the selected ComfyUI torch/CUDA stack.
+-r requirements-editor.txt

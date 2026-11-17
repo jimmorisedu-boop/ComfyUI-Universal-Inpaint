@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "product": "Universal Inpaint",
+  "version": "0.1.0",
+  "python": {
+    "minimum": "3.10",
+    "note": "Use the ComfyUI portable embedded interpreter or the interpreter that owns the selected ComfyUI venv. The installer never installs or replaces Python, torch, CUDA, xformers, or torchvision."
+  },
+  "profiles": {
+    "editor": {
+      "description": "CPU mask editor and deterministic mask preparation; no model weights.",
+      "requirements": ["requirements-editor.txt"],
+      "custom_nodes": [],
+      "workflows": [],
+      "models": [],
+      "checks": ["numpy", "PIL", "cv2"]
+    },
+    "sam3": {
+      "description": "Native SAM3 rectangle/video tracking adapter. The Meta checkpoint is gated and must be obtained manually after accepting its license.",
+      "requirements": ["requirements-sam3.txt"],
+      "custom_nodes": ["comfyui-sam3"],
+      "workflows": [],
+      "models": ["sam3-native"],
+      "checks": ["torch", "numpy", "PIL", "cv2"],
+      "manual_notes": [
+        "This profile installs only the public ComfyUI-SAM3 wrapper; it does not run its optional comfy-env/pixi installer.",
+        "The Universal Inpaint adapter requires nodes/_model_cache.py, nodes/sam3_model_patcher.py and the bundled BPE tokenizer.",
+        "SAM3 model access is gated on Hugging Face; accept the terms yourself and use HF_TOKEN or an existing hf auth login."
+      ]
+    },
+    "autoprompt": {
+      "description": "Florence-2 PromptGen captioning for the optional AutoPrompt workflow.",
+      "requirements": ["requirements-autoprompt.txt"],
+      "custom_nodes": ["comfyui-florence2"],
+      "workflows": ["V69_Universal_AutoPrompt_Repair.json", "V70_Universal_Repair_Workbench.json"],
+      "models": ["florence2-promptgen-v2"],
+      "checks": ["torch", "transformers", "PIL"]
+    },
+    "h3": {
+      "description": "Native ComfyUI MiniMax H3 workflows and MaskVidExperiments helpers. H3 checkpoints are large; no torch/CUDA replacement is attempted.",
+      "requirements": ["requirements-h3.txt"],
+      "custom_nodes": ["maskvid-experiments"],
+      "workflows": [
+        "V69_Universal_Masked_Repair.json",
+        "V69_Universal_Masked_Repair_MASK_ONLY.json",
+        "V69_Universal_Reference_Repair.json",
+        "V70_Universal_Repair_Workbench.json"
+      ],
+      "models": [
+        "h3-video-vae",
+        "h3-audio-vae",
+        "h3-ref2va",
+        "h3-qwen"
+      ],
+      "checks": ["torch", "torchaudio", "av"],
+      "manual_notes": [
+        "H3 execution is delegated to the ComfyUI core node comfy_extras.nodes_minimax_h3; a compatible ComfyUI build is required.",
+        "The historical PathchSageAttentionKJ/private runtime is not published as a verified public dependency and is never cloned by this installer.",
+        "A successful plan/check does not claim a clean H3 render or visual-quality acceptance."
+      ]
+    }
+  },
+  "custom_nodes": {
+    "comfyui-sam3": {
+      "destination": "custom_nodes/comfyui-sam3",
+      "repo": "https://github.com/PozzettiAndrea/ComfyUI-SAM3.git",
+      "revision": "de0ff5d2c2ea435d29f800abfa568cffdfb94773",
+      "expected_remote": "https://github.com/PozzettiAndrea/ComfyUI-SAM3.git",
+      "license": "MIT wrapper plus SAM license notices from upstream",
+      "source": "https://github.com/PozzettiAndrea/ComfyUI-SAM3"
+    },
+    "comfyui-florence2": {
+      "destination": "custom_nodes/comfyui-florence2",
+      "repo": "https://github.com/kijai/ComfyUI-Florence2.git",
+      "revision": "9ece3de914214c5f581d725167bc9d0eeb0d1120",
+      "expected_remote": "https://github.com/kijai/ComfyUI-Florence2.git",
+      "license": "See upstream LICENSE",
+      "source": "https://github.com/kijai/ComfyUI-Florence2"
+    },
+    "maskvid-experiments": {
+      "destination": "custom_nodes/MaskVidExperiments",
+      "repo": "https://github.com/drozbay/MaskVidExperiments.git",
+      "revision": "c32ed8c17e6fe892a174ebf25fe98b1317de97fb",
+      "expected_remote": "https://github.com/drozbay/MaskVidExperiments.git",
+      "license": "See upstream LICENSE",
+      "source": "https://github.com/drozbay/MaskVidExperiments"
+    }
+  },
+  "sources": {
+    "comfyui": {
+      "repo": "https://github.com/Comfy-Org/ComfyUI.git",
+      "branch": "master",
+      "minimum_version": "0.37.0",
+      "required_module": "comfy_extras.nodes_minimax_h3",
+      "source": "https://github.com/Comfy-Org/ComfyUI/blob/master/comfy_extras/nodes_minimax_h3.py"
+    },
+    "sam3": {
+      "repo": "https://github.com/facebookresearch/sam3.git",
+      "revision": "eef6839bcfc3458dd52ea80535dc6bd62aea86b1",
+      "source": "https://github.com/facebookresearch/sam3",
+      "note": "Research code and checkpoints are gated; this manifest does not clone or install it separately."
+    }
+  }
+}

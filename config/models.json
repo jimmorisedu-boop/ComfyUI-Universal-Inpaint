@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "product": "Universal Inpaint",
+  "version": "0.1.0",
+  "registry": "Hugging Face Hub",
+  "base_url": "https://huggingface.co",
+  "models": [
+    {
+      "id": "florence2-promptgen-v2",
+      "profiles": [
+        "autoprompt"
+      ],
+      "repo": "MiaoshouAI/Florence-2-base-PromptGen-v2.0",
+      "revision": "59b6e4bf75d0f3e8a6b1a14211f6a50fcdd48d63",
+      "filename": "model.safetensors",
+      "destination": "models/LLM/Florence-2-base-PromptGen-v2.0/model.safetensors",
+      "size_bytes": 1083916964,
+      "sha256": "25bef969c7bcfb38011c114b678a9f2483a692ebae7a4cbb3eb2868c51fc086d",
+      "destination_dir": "models/LLM/Florence-2-base-PromptGen-v2.0",
+      "license": "MIT (see the upstream model card and repository)",
+      "gated": false,
+      "source": "https://huggingface.co/MiaoshouAI/Florence-2-base-PromptGen-v2.0",
+      "files": [
+        {
+          "filename": "config.json",
+          "size_bytes": 3827,
+          "sha256": "9fe6f2fd99b1386693e6cf35283d8b0a0ca89d610d5355a0bad54d551a5d397e"
+        },
+        {
+          "filename": "model.safetensors",
+          "size_bytes": 1083916964,
+          "sha256": "25bef969c7bcfb38011c114b678a9f2483a692ebae7a4cbb3eb2868c51fc086d"
+        },
+        {
+          "filename": "tokenizer.json",
+          "size_bytes": 2297961,
+          "sha256": "d69dcdb2323e124ac4f800cb9863ddccea0d7bb11e16125e8df3bd60f2f8aeac"
+        },
+        {
+          "filename": "tokenizer_config.json",
+          "size_bytes": 197658,
+          "sha256": "d8e64607233cb53b619fb46664f6cad08176c26e0e8735b2d30d888364f19600"
+        },
+        {
+          "filename": "preprocessor_config.json",
+          "size_bytes": 603,
+          "sha256": "1396ec5a0a7adfe1c04fb777b09e8ba753be6dbb5868212ab3c3ef39d91fe031"
+        },
+        {
+          "filename": "processing_florence2.py",
+          "size_bytes": 46372,
+          "sha256": "4bd7158536cbf1c7891fc8efd94437d79fd09f07f539c7398fab8a885d7d8bca"
+        },
+        {
+          "filename": "modeling_florence2.py",
+          "size_bytes": 127219,
+          "sha256": "fd86847d3b39cc084a43361d603343e1f189c17c1eb8a23426a496b50985b616"
+        },
+        {
+          "filename": "configuration_florence2.py",
+          "size_bytes": 15125,
+          "sha256": "653bafddc9651eaff1583a16db4a2bb27d33ec7d541dfab7201aaa4ecaa1cfbf"
+        },
+        {
+          "filename": "generation_config.json",
+          "size_bytes": 292,
+          "sha256": "021e952dfa5194ac92a0bcfca7216362a31ba3883e90de301100c132dfdcd217"
+        },
+        {
+          "filename": "special_tokens_map.json",
+          "size_bytes": 146627,
+          "sha256": "72ff172dc769bc1551b1b4211628ce3271643bc60379e4da45d85a9be9332c39"
+        },
+        {
+          "filename": "added_tokens.json",
+          "size_bytes": 22410,
+          "sha256": "ba67457c577895525996e7a42d7da60a05856506ea4fd25ff9a023a64662f74b"
+        },
+        {
+          "filename": "merges.txt",
+          "size_bytes": 456318,
+          "sha256": "1ce1664773c50f3e0cc8842619a93edc4624525b728b188a9e0be33b7726adc5"
+        },
+        {
+          "filename": "vocab.json",
+          "size_bytes": 798293,
+          "sha256": "ed19656ea1707df69134c4af35c8ceda2cc9860bf2c3495026153a133670ab5e"
+        }
+      ],
+      "notes": [
+        "All files are pinned to one immutable Hub revision. Auxiliary file sizes and SHA-256 values were verified against public downloads on 2026-11-17; model weights use the Hub LFS SHA-256."
+      ]
+    },
+    {
+      "id": "sam3-native",
+      "profiles": [
+        "sam3"
+      ],
+      "repo": "facebook/sam3",
+      "revision": "3c879f39826c281e95690f02c7821c4de09afae7",
+      "filename": "model.safetensors",
+      "destination": "models/sam3/sam3.safetensors",
+      "size_bytes": null,
+      "sha256": null,
+      "license": "Gated SAM 3 license; see the model card before downloading",
+      "gated": true,
+      "source": "https://huggingface.co/facebook/sam3",
+      "access_url": "https://huggingface.co/facebook/sam3",
+      "notes": [
+        "No automatic licence acceptance is performed. Visit the access URL, accept the terms yourself, then use HF_TOKEN or hf auth login.",
+        "Unauthenticated HEAD requests currently return HTTP 401 (GatedRepo); this is an expected manual-access blocker, not a missing URL."
+      ]
+    },
+    {
+      "id": "h3-video-vae",
+      "profiles": [
+        "h3"
+      ],
+      "repo": "Comfy-Org/MiniMax-H3",
+      "revision": "4b53a35191437de05370da548e59aeabe2a5a09a",
+      "filename": "vae/minimax_h3_video_vae_fp16.safetensors",
+      "destination": "models/vae/minimax_h3_video_vae_fp16.safetensors",
+      "size_bytes": 5207808496,
+      "sha256": "5b86f3fb5dc7c87949426a9262ebda3d95f4d414f8075afb895b321cadc617a",
+      "license": "See Comfy-Org/MiniMax-H3 model card (license: other)",
+      "gated": false,
+      "source": "https://huggingface.co/Comfy-Org/MiniMax-H3"
+    },
+    {
+      "id": "h3-audio-vae",
+      "profiles": [
+        "h3"
+      ],
+      "repo": "Comfy-Org/MiniMax-H3",
+      "revision": "4b53a35191437de05370da548e59aeabe2a5a09a",
+      "filename": "vae/minimax_h3_audio_vae_fp32.safetensors",
+      "destination": "models/vae/minimax_h3_audio_vae_fp32.safetensors",
+      "size_bytes": 605254808,
+      "sha256": "d132ce0297fda95139762b689c22de3507581b897c03f766964a9edfee8c8d3c",
+      "license": "See Comfy-Org/MiniMax-H3 model card (license: other)",
+      "gated": false,
+      "source": "https://huggingface.co/Comfy-Org/MiniMax-H3"
+    },
+    {
+      "id": "h3-ref2va",
+      "profiles": [
+        "h3"
+      ],
+      "repo": "Comfy-Org/MiniMax-H3",
+      "revision": "4b53a35191437de05370da548e59aeabe2a5a09a",
+      "filename": "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "destination": "models/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "size_bytes": 20970379616,
+      "sha256": "06cd9af20fdf280d804d14c30560f6bb3b93f94274fe31235485b18107dd88ba",
+      "license": "See Comfy-Org/MiniMax-H3 model card (license: other)",
+      "gated": false,
+      "source": "https://huggingface.co/Comfy-Org/MiniMax-H3"
+    },
+    {
+      "id": "h3-qwen",
+      "profiles": [
+        "h3"
+      ],
+      "repo": "Comfy-Org/MiniMax-H3",
+      "revision": "4b53a35191437de05370da548e59aeabe2a5a09a",
+      "filename": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "destination": "models/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "size_bytes": 15687142551,
+      "sha256": "e2674b88dea1ab1aa531a578128aec51fab6adb17920ef100e88931b455c328e",
+      "license": "See Comfy-Org/MiniMax-H3 model card (license: other)",
+      "gated": false,
+      "source": "https://huggingface.co/Comfy-Org/MiniMax-H3"
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comfyui-universal-inpaint"
+version = "0.1.0"
+description = "Portable ComfyUI nodes and workflows for user-masked video repair"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-only" }
+authors = [{ name = "jimmorisedu-boop" }]
+maintainers = [{ name = "jimmorisedu-boop" }]
+keywords = ["comfyui", "video", "inpainting", "mask", "sam3"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+cpu = ["opencv-python>=4.8", "Pillow>=10"]
+dev = ["pytest>=8", "opencv-python>=4.8", "Pillow>=10"]
+
+[project.urls]
+Homepage = "https://github.com/jimmorisedu-boop/ComfyUI-Universal-Inpaint"
+Repository = "https://github.com/jimmorisedu-boop/ComfyUI-Universal-Inpaint"
+Issues = "https://github.com/jimmorisedu-boop/ComfyUI-Universal-Inpaint/issues"
+
+[tool.setuptools]
+include-package-data = true
+py-modules = [
+  "__init__",
+  "auto_prompt_core",
+  "auto_prompt_nodes",
+  "corrected_frame_nodes",
+  "mask_core",
+  "mask_nodes",
+  "mask_sam3",
+  "mask_sam3_video",
+  "repair_nodes",
+]
+
+[tool.setuptools.data-files]
+"web" = ["web/*"]
+"workflows" = ["workflows/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"

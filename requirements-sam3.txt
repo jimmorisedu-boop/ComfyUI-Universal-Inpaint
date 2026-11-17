@@ -1,0 +1,16 @@
+# Public ComfyUI-SAM3 wrapper dependencies, adapted from its pinned upstream
+# requirements.txt.  torch/torchvision/torchaudio are deliberately omitted:
+# use the versions already supplied by ComfyUI and install them separately only
+# when you explicitly choose a matching CUDA build.
+decord>=0.6.0
+pycocotools>=2.0.10
+timm>=1.0.17
+numpy>=1.26
+tqdm
+ftfy==6.1.1
+regex
+iopath>=0.1.10
+typing_extensions
+huggingface_hub
+triton-windows; sys_platform == "win32"
+triton; sys_platform != "win32"

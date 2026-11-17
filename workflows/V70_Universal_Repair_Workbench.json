@@ -1,0 +1,1859 @@
+{
+  "id": "d021068d-52e1-5cd0-941a-7b08dd7ceb02",
+  "revision": 1,
+  "last_node_id": 104,
+  "last_link_id": 52,
+  "nodes": [
+    {
+      "id": 10,
+      "type": "LoadVideo",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        400,
+        350
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "links": [
+            1
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadVideo"
+      },
+      "widgets_values": [
+        "REPLACE_WITH_INPUT_VIDEO.mp4"
+      ],
+      "title": "01 · Загрузить исходное видео"
+    },
+    {
+      "id": 11,
+      "type": "GetVideoComponents",
+      "pos": [
+        40,
+        440
+      ],
+      "size": [
+        400,
+        220
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            2,
+            3,
+            6,
+            37,
+            43,
+            46,
+            50
+          ]
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            40,
+            47
+          ]
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "links": [
+            5,
+            41,
+            52
+          ]
+        },
+        {
+          "name": "bit_depth",
+          "type": "COMBO",
+          "links": []
+        },
+        {
+          "name": "color_space",
+          "type": "COMBO",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GetVideoComponents"
+      },
+      "widgets_values": [],
+      "title": "02 · Кадры + исходные FPS + звук"
+    },
+    {
+      "id": 20,
+      "type": "THSUniversalMaskEditor",
+      "pos": [
+        500,
+        40
+      ],
+      "size": [
+        1000,
+        850
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 2
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "link": 5,
+          "widget": {
+            "name": "fps"
+          },
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "edit_mask",
+          "type": "MASK",
+          "links": [
+            7,
+            9,
+            44
+          ]
+        },
+        {
+          "name": "preview",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "THSUniversalMaskEditor"
+      },
+      "widgets_values": [
+        "{}",
+        "optical_flow",
+        8,
+        4,
+        0,
+        -1,
+        24.0
+      ],
+      "title": "03 · РЕДАКТОР МАСКИ (очередь только Preview для старта)"
+    },
+    {
+      "id": 22,
+      "type": "THSUniversalAutoPrompt",
+      "pos": [
+        1560,
+        40
+      ],
+      "size": [
+        620,
+        500
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 43
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 44
+        }
+      ],
+      "outputs": [
+        {
+          "name": "prompt",
+          "type": "STRING",
+          "links": [
+            45
+          ]
+        },
+        {
+          "name": "caption",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "name": "preview",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "THSUniversalAutoPrompt",
+        "preview_enabled": false
+      },
+      "widgets_values": [
+        "auto",
+        "",
+        "",
+        3,
+        0.6,
+        false
+      ],
+      "title": "03b · Автопромпт по контексту маски (локально)"
+    },
+    {
+      "id": 30,
+      "type": "THSUniversalH3PadSource",
+      "pos": [
+        40,
+        1000
+      ],
+      "size": [
+        200,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 3
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 7
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": null,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "padded_images",
+          "type": "IMAGE",
+          "links": [
+            10
+          ]
+        },
+        {
+          "name": "padded_mask",
+          "type": "MASK",
+          "links": [
+            11
+          ]
+        },
+        {
+          "name": "padded_audio",
+          "type": "AUDIO",
+          "links": []
+        },
+        {
+          "name": "original_count",
+          "type": "INT",
+          "links": [
+            13
+          ]
+        },
+        {
+          "name": "padded_count",
+          "type": "INT",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "THSUniversalH3PadSource"
+      },
+      "widgets_values": [
+        24.0,
+        17,
+        5,
+        48000
+      ],
+      "title": "04 · Паддинг H3 17n+5 (реальные кадры не меняются)"
+    },
+    {
+      "id": 40,
+      "type": "VAELoader",
+      "pos": [
+        820,
+        1000
+      ],
+      "size": [
+        200,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            15,
+            16,
+            17,
+            18
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "minimax_h3_video_vae_fp16.safetensors"
+      ],
+      "title": "VAE · видео"
+    },
+    {
+      "id": 41,
+      "type": "VAELoader",
+      "pos": [
+        820,
+        1080
+      ],
+      "size": [
+        200,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            19
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "minimax_h3_audio_vae_fp32.safetensors"
+      ],
+      "title": "VAE · служебный звук"
+    },
+    {
+      "id": 42,
+      "type": "UNETLoader",
+      "pos": [
+        800,
+        1160
+      ],
+      "size": [
+        200,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            32
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "UNETLoader"
+      },
+      "widgets_values": [
+        "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "default"
+      ],
+      "title": "MiniMax H3 · основной модельный core"
+    },
+    {
+      "id": 43,
+      "type": "CLIPLoader",
+      "pos": [
+        40,
+        1320
+      ],
+      "size": [
+        200,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            21
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPLoader"
+      },
+      "widgets_values": [
+        "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "minimax",
+        "default"
+      ],
+      "title": "Qwen3-VL · H3 conditioning"
+    },
+    {
+      "id": 50,
+      "type": "MVEx_MaskToLatentSpace",
+      "pos": [
+        560,
+        1000
+      ],
+      "size": [
+        200,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "masks",
+          "type": "MASK",
+          "link": 11
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 18,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": [
+            22
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MVEx_MaskToLatentSpace"
+      },
+      "widgets_values": [
+        "auto",
+        "max",
+        "max",
+        0,
+        0,
+        "both"
+      ],
+      "title": "05 · Маска → latent space (MAX/MAX)"
+    },
+    {
+      "id": 51,
+      "type": "VAEEncode",
+      "pos": [
+        40,
+        1080
+      ],
+      "size": [
+        200,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "pixels",
+          "type": "IMAGE",
+          "link": 10
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 15
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            23
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEEncode"
+      },
+      "widgets_values": [],
+      "title": "06 · Исходный RGB → source latent"
+    },
+    {
+      "id": 52,
+      "type": "SetLatentNoiseMask",
+      "pos": [
+        300,
+        1080
+      ],
+      "size": [
+        200,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 23
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 22
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            24
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SetLatentNoiseMask"
+      },
+      "widgets_values": [],
+      "title": "07 · Пользовательская маска ограничивает denoise"
+    },
+    {
+      "id": 53,
+      "type": "VAEEncodeAudio",
+      "pos": [
+        560,
+        1080
+      ],
+      "size": [
+        200,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 48
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 19
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            25
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEEncodeAudio"
+      },
+      "widgets_values": [],
+      "title": "08 · Аудио latent (выходной звук не заменяется)"
+    },
+    {
+      "id": 54,
+      "type": "SolidMask",
+      "pos": [
+        40,
+        1160
+      ],
+      "size": [
+        180,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": [
+            26
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SolidMask"
+      },
+      "widgets_values": [
+        0,
+        32,
+        32
+      ],
+      "title": "Аудио не денойзить"
+    },
+    {
+      "id": 55,
+      "type": "SetLatentNoiseMask",
+      "pos": [
+        280,
+        1160
+      ],
+      "size": [
+        200,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 25
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 26
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            27
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SetLatentNoiseMask"
+      },
+      "widgets_values": [],
+      "title": "Lock audio latent"
+    },
+    {
+      "id": 56,
+      "type": "LTXVConcatAVLatent",
+      "pos": [
+        540,
+        1160
+      ],
+      "size": [
+        200,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video_latent",
+          "type": "LATENT",
+          "link": 24
+        },
+        {
+          "name": "audio_latent",
+          "type": "LATENT",
+          "link": 27
+        }
+      ],
+      "outputs": [
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "links": [
+            28
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LTXVConcatAVLatent"
+      },
+      "widgets_values": [],
+      "title": "09 · H3 AV latent"
+    },
+    {
+      "id": 60,
+      "type": "GetImageSize",
+      "pos": [
+        40,
+        1240
+      ],
+      "size": [
+        200,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "width",
+          "type": "INT",
+          "links": [
+            29
+          ]
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "links": [
+            30
+          ]
+        },
+        {
+          "name": "batch_size",
+          "type": "INT",
+          "links": [
+            49
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GetImageSize"
+      },
+      "widgets_values": [],
+      "title": "Размер source canvas"
+    },
+    {
+      "id": 61,
+      "type": "THSUniversalH3RepairConditioning",
+      "pos": [
+        300,
+        1240
+      ],
+      "size": [
+        400,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 21
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 16
+        },
+        {
+          "name": "prompt",
+          "type": "STRING",
+          "link": 45,
+          "widget": {
+            "name": "prompt"
+          }
+        },
+        {
+          "name": "width",
+          "type": "INT",
+          "link": 29,
+          "widget": {
+            "name": "width"
+          }
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "link": 30,
+          "widget": {
+            "name": "height"
+          }
+        },
+        {
+          "name": "length",
+          "type": "INT",
+          "link": 49,
+          "widget": {
+            "name": "length"
+          }
+        },
+        {
+          "name": "source_images",
+          "type": "IMAGE",
+          "link": null,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "links": [
+            33
+          ]
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "links": [
+            34
+          ]
+        },
+        {
+          "name": "h3_latent",
+          "type": "LATENT",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "THSUniversalH3RepairConditioning"
+      },
+      "widgets_values": [
+        "REPLACE_WITH_REPAIR_PROMPT",
+        "REPLACE_WITH_NEGATIVE_PROMPT",
+        768,
+        768,
+        22,
+        false
+      ],
+      "title": "10 · H3 repair conditioning (reference-free default)"
+    },
+    {
+      "id": 80,
+      "type": "KSampler",
+      "pos": [
+        300,
+        1320
+      ],
+      "size": [
+        520,
+        250
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 32
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 33
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 34
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 28
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            35
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "KSampler"
+      },
+      "widgets_values": [
+        0,
+        "fixed",
+        15,
+        1.0,
+        "er_sde",
+        "simple",
+        0.65
+      ],
+      "title": "11 · MASKED REPAIR · denoise 0.65 (adjustable; no quality promise)"
+    },
+    {
+      "id": 90,
+      "type": "VAEDecode",
+      "pos": [
+        1840,
+        1000
+      ],
+      "size": [
+        200,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 35
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 17
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            36
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEDecode"
+      },
+      "widgets_values": [],
+      "title": "12 · Декодировать результат"
+    },
+    {
+      "id": 91,
+      "type": "THSUniversalTrimFrames",
+      "pos": [
+        2088,
+        1000
+      ],
+      "size": [
+        200,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 36
+        },
+        {
+          "name": "original_count",
+          "type": "INT",
+          "link": 13
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            38
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "THSUniversalTrimFrames"
+      },
+      "widgets_values": [],
+      "title": "13 · Убрать synthetic H3 tail"
+    },
+    {
+      "id": 92,
+      "type": "THSUniversalMaskedComposite",
+      "pos": [
+        1840,
+        1080
+      ],
+      "size": [
+        280,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "IMAGE",
+          "link": 37
+        },
+        {
+          "name": "generated",
+          "type": "IMAGE",
+          "link": 38
+        },
+        {
+          "name": "repair_mask",
+          "type": "MASK",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            39,
+            51
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "THSUniversalMaskedComposite"
+      },
+      "widgets_values": [],
+      "title": "14 · Exact source outside repair mask"
+    },
+    {
+      "id": 100,
+      "type": "CreateVideo",
+      "pos": [
+        1840,
+        1160
+      ],
+      "size": [
+        320,
+        160
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 39
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "link": 41,
+          "widget": {
+            "name": "fps"
+          }
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 40,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "links": [
+            42
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CreateVideo"
+      },
+      "widgets_values": [
+        24,
+        8,
+        "sRGB",
+        "none"
+      ],
+      "title": "15 · Исходные FPS + исходное аудио"
+    },
+    {
+      "id": 101,
+      "type": "SaveVideo",
+      "pos": [
+        1840,
+        1340
+      ],
+      "size": [
+        320,
+        100
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": 42
+        }
+      ],
+      "outputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SaveVideo"
+      },
+      "widgets_values": [
+        "video/universal_inpaint_workbench_output",
+        "auto",
+        "auto"
+      ],
+      "title": "16 · РЕЗУЛЬТАТ"
+    },
+    {
+      "id": 102,
+      "type": "THSUniversalH3PadAudio",
+      "pos": [
+        300,
+        1000
+      ],
+      "size": [
+        200,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 46
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 47,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "padded_audio",
+          "type": "AUDIO",
+          "links": [
+            48
+          ]
+        },
+        {
+          "name": "original_count",
+          "type": "INT",
+          "links": []
+        },
+        {
+          "name": "padded_count",
+          "type": "INT",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "THSUniversalH3PadAudio"
+      },
+      "widgets_values": [
+        24.0,
+        17,
+        5,
+        48000
+      ],
+      "title": "Технический · H3 audio pad 17n+5"
+    },
+    {
+      "id": 103,
+      "type": "THSUniversalPromptText",
+      "pos": [
+        1560,
+        600
+      ],
+      "size": [
+        620,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "text"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "prompt",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "THSUniversalPromptText"
+      },
+      "widgets_values": [
+        "REPLACE_WITH_REPAIR_PROMPT"
+      ],
+      "title": "Промпт · независимый текст (Freeze)"
+    },
+    {
+      "id": 104,
+      "type": "THSUniversalRepairCompare",
+      "pos": [
+        1080,
+        1000
+      ],
+      "size": [
+        700,
+        300
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "IMAGE",
+          "link": 50
+        },
+        {
+          "name": "result",
+          "type": "IMAGE",
+          "link": 51
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "link": 52,
+          "shape": 7
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "THSUniversalRepairCompare"
+      },
+      "widgets_values": [
+        24.0
+      ],
+      "title": "Сравнение · wipe исходник / результат"
+    }
+  ],
+  "links": [
+    [
+      1,
+      10,
+      0,
+      11,
+      0,
+      "VIDEO"
+    ],
+    [
+      2,
+      11,
+      0,
+      20,
+      0,
+      "IMAGE"
+    ],
+    [
+      3,
+      11,
+      0,
+      30,
+      0,
+      "IMAGE"
+    ],
+    [
+      5,
+      11,
+      2,
+      20,
+      1,
+      "FLOAT"
+    ],
+    [
+      6,
+      11,
+      0,
+      60,
+      0,
+      "IMAGE"
+    ],
+    [
+      7,
+      20,
+      0,
+      30,
+      1,
+      "MASK"
+    ],
+    [
+      9,
+      20,
+      0,
+      92,
+      2,
+      "MASK"
+    ],
+    [
+      10,
+      30,
+      0,
+      51,
+      0,
+      "IMAGE"
+    ],
+    [
+      11,
+      30,
+      1,
+      50,
+      0,
+      "MASK"
+    ],
+    [
+      13,
+      30,
+      3,
+      91,
+      1,
+      "INT"
+    ],
+    [
+      15,
+      40,
+      0,
+      51,
+      1,
+      "VAE"
+    ],
+    [
+      16,
+      40,
+      0,
+      61,
+      1,
+      "VAE"
+    ],
+    [
+      17,
+      40,
+      0,
+      90,
+      1,
+      "VAE"
+    ],
+    [
+      18,
+      40,
+      0,
+      50,
+      1,
+      "VAE"
+    ],
+    [
+      19,
+      41,
+      0,
+      53,
+      1,
+      "VAE"
+    ],
+    [
+      21,
+      43,
+      0,
+      61,
+      0,
+      "CLIP"
+    ],
+    [
+      22,
+      50,
+      0,
+      52,
+      1,
+      "MASK"
+    ],
+    [
+      23,
+      51,
+      0,
+      52,
+      0,
+      "LATENT"
+    ],
+    [
+      24,
+      52,
+      0,
+      56,
+      0,
+      "LATENT"
+    ],
+    [
+      25,
+      53,
+      0,
+      55,
+      0,
+      "LATENT"
+    ],
+    [
+      26,
+      54,
+      0,
+      55,
+      1,
+      "MASK"
+    ],
+    [
+      27,
+      55,
+      0,
+      56,
+      1,
+      "LATENT"
+    ],
+    [
+      28,
+      56,
+      0,
+      80,
+      3,
+      "LATENT"
+    ],
+    [
+      29,
+      60,
+      0,
+      61,
+      3,
+      "INT"
+    ],
+    [
+      30,
+      60,
+      1,
+      61,
+      4,
+      "INT"
+    ],
+    [
+      32,
+      42,
+      0,
+      80,
+      0,
+      "MODEL"
+    ],
+    [
+      33,
+      61,
+      0,
+      80,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      34,
+      61,
+      1,
+      80,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      35,
+      80,
+      0,
+      90,
+      0,
+      "LATENT"
+    ],
+    [
+      36,
+      90,
+      0,
+      91,
+      0,
+      "IMAGE"
+    ],
+    [
+      37,
+      11,
+      0,
+      92,
+      0,
+      "IMAGE"
+    ],
+    [
+      38,
+      91,
+      0,
+      92,
+      1,
+      "IMAGE"
+    ],
+    [
+      39,
+      92,
+      0,
+      100,
+      0,
+      "IMAGE"
+    ],
+    [
+      40,
+      11,
+      1,
+      100,
+      2,
+      "AUDIO"
+    ],
+    [
+      41,
+      11,
+      2,
+      100,
+      1,
+      "FLOAT"
+    ],
+    [
+      42,
+      100,
+      0,
+      101,
+      0,
+      "VIDEO"
+    ],
+    [
+      43,
+      11,
+      0,
+      22,
+      0,
+      "IMAGE"
+    ],
+    [
+      44,
+      20,
+      0,
+      22,
+      1,
+      "MASK"
+    ],
+    [
+      45,
+      22,
+      0,
+      61,
+      2,
+      "STRING"
+    ],
+    [
+      46,
+      11,
+      0,
+      102,
+      0,
+      "IMAGE"
+    ],
+    [
+      47,
+      11,
+      1,
+      102,
+      1,
+      "AUDIO"
+    ],
+    [
+      48,
+      102,
+      0,
+      53,
+      0,
+      "AUDIO"
+    ],
+    [
+      49,
+      60,
+      2,
+      61,
+      5,
+      "INT"
+    ],
+    [
+      50,
+      11,
+      0,
+      104,
+      0,
+      "IMAGE"
+    ],
+    [
+      51,
+      92,
+      0,
+      104,
+      1,
+      "IMAGE"
+    ],
+    [
+      52,
+      11,
+      2,
+      104,
+      2,
+      "FLOAT"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 4700,
+      "title": "01 · SOURCE / ИСХОДНИК",
+      "bounding": [
+        -8,
+        -8,
+        496,
+        716
+      ],
+      "color": "#555b62",
+      "font_size": 20,
+      "flags": {}
+    },
+    {
+      "id": 4701,
+      "title": "02 · MASK / МАСКА",
+      "bounding": [
+        452,
+        -8,
+        1096,
+        946
+      ],
+      "color": "#585f66",
+      "font_size": 20,
+      "flags": {}
+    },
+    {
+      "id": 4702,
+      "title": "03 · PROMPT / ПРОМПТ",
+      "bounding": [
+        1512,
+        -8,
+        716,
+        686
+      ],
+      "color": "#5b6168",
+      "font_size": 20,
+      "flags": {}
+    },
+    {
+      "id": 4703,
+      "title": "04 · GENERATE / ГЕНЕРАЦИЯ",
+      "bounding": [
+        -8,
+        952,
+        1076,
+        666
+      ],
+      "color": "#555b62",
+      "font_size": 20,
+      "flags": {}
+    },
+    {
+      "id": 4704,
+      "title": "05 · COMPARE / СРАВНЕНИЕ",
+      "bounding": [
+        1032,
+        952,
+        796,
+        396
+      ],
+      "color": "#5a6067",
+      "font_size": 20,
+      "flags": {}
+    },
+    {
+      "id": 4705,
+      "title": "06 · EXPORT / ЭКСПОРТ",
+      "bounding": [
+        1792,
+        952,
+        544,
+        536
+      ],
+      "color": "#59635b",
+      "font_size": 20,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ths": {
+      "workflow_name": "Universal_Inpaint_Repair_Workbench",
+      "source_latent_inpaint": true,
+      "user_mask_is_authoritative": true,
+      "exact_pixels_outside_mask": true,
+      "h3_internal_fps": 24.0,
+      "source_canvas_multiple": 32,
+      "output_fps": "source video FPS",
+      "output_audio": "source video audio passthrough",
+      "denoise_default": 0.65,
+      "denoise_note": "adjustable starting point; not a quality promise",
+      "models": {
+        "video_vae": "minimax_h3_video_vae_fp16.safetensors",
+        "audio_vae": "minimax_h3_audio_vae_fp32.safetensors",
+        "unet": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "clip": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+      },
+      "mask_tracking_is_approximate": true,
+      "auto_prompt": {
+        "node_type": "THSUniversalAutoPrompt",
+        "node_id": 22,
+        "caption_backend": "installed local caption backend",
+        "prompt_output": "node 22 slot 0 → conditioner 61 prompt widget",
+        "ui_keys": [
+          "auto_prompt_text",
+          "auto_prompt_caption",
+          "auto_prompt_status"
+        ],
+        "manual_workflow_fallback": "V69_Universal_Masked_Repair.json",
+        "preview_enabled": false
+      },
+      "source_workflow": "V69_Universal_AutoPrompt_Repair.json",
+      "workbench": {
+        "groups": [
+          "01 · SOURCE / ИСХОДНИК",
+          "02 · MASK / МАСКА",
+          "03 · PROMPT / ПРОМПТ",
+          "04 · GENERATE / ГЕНЕРАЦИЯ",
+          "05 · COMPARE / СРАВНЕНИЕ",
+          "06 · EXPORT / ЭКСПОРТ"
+        ],
+        "source_node_id": 10,
+        "mask_editor_node_id": 20,
+        "auto_prompt_node_id": 22,
+        "frozen_prompt_node_id": 103,
+        "audio_pad_node_id": 102,
+        "compare_node_id": 104,
+        "freeze_mode": "node 22 mode=2 (NEVER/muted), node 103 slot 0 → conditioner 61 prompt",
+        "unfreeze_mode": "restore node 22 slot 0 → conditioner 61 prompt and original mode",
+        "prompt_preview_enabled": false,
+        "audio_pad": {
+          "model_fps": 24.0,
+          "modulo": 17,
+          "remainder": 5,
+          "silence_sample_rate": 48000
+        },
+        "compare": "lazy UI descriptors; synchronized frame and wipe navigation"
+      }
+    }
+  },
+  "version": 0.4
+}

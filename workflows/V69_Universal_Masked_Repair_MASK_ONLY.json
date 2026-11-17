@@ -1,0 +1,353 @@
+{
+  "id": "V69-UNIVERSAL-MASKED-REPAIR-MASK-ONLY",
+  "revision": 0,
+  "last_node_id": 23,
+  "last_link_id": 6,
+  "nodes": [
+    {
+      "id": 10,
+      "type": "LoadVideo",
+      "pos": [
+        80,
+        140
+      ],
+      "size": [
+        560,
+        640
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "links": [
+            1
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadVideo"
+      },
+      "widgets_values": [
+        "REPLACE_WITH_INPUT_VIDEO.mp4"
+      ],
+      "title": "01 · Загрузить исходное видео"
+    },
+    {
+      "id": 11,
+      "type": "GetVideoComponents",
+      "pos": [
+        700,
+        140
+      ],
+      "size": [
+        500,
+        260
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            2
+          ]
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": []
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "links": [
+            3
+          ]
+        },
+        {
+          "name": "bit_depth",
+          "type": "COMBO",
+          "links": []
+        },
+        {
+          "name": "color_space",
+          "type": "COMBO",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GetVideoComponents"
+      },
+      "widgets_values": [],
+      "title": "02 · Кадры + исходные FPS"
+    },
+    {
+      "id": 20,
+      "type": "THSUniversalMaskEditor",
+      "pos": [
+        80,
+        900
+      ],
+      "size": [
+        1200,
+        1050
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 2
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "link": 3,
+          "widget": {
+            "name": "fps"
+          },
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "edit_mask",
+          "type": "MASK",
+          "links": [
+            4
+          ]
+        },
+        {
+          "name": "preview",
+          "type": "IMAGE",
+          "links": [
+            6
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "THSUniversalMaskEditor"
+      },
+      "widgets_values": [
+        "{}",
+        "optical_flow",
+        8,
+        4,
+        0,
+        -1,
+        24.0
+      ],
+      "title": "03 · РЕДАКТОР МАСКИ · сначала Queue Preview/Save"
+    },
+    {
+      "id": 21,
+      "type": "MaskToImage",
+      "pos": [
+        1320,
+        2050
+      ],
+      "size": [
+        520,
+        360
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            5
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MaskToImage"
+      },
+      "widgets_values": [],
+      "title": "04 · Маска в PNG для проверки"
+    },
+    {
+      "id": 22,
+      "type": "SaveImage",
+      "pos": [
+        1900,
+        2050
+      ],
+      "size": [
+        460,
+        190
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 5
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "masks/universal_inpaint_mask_output"
+      ],
+      "title": "05 · Сохранить маску (опционально)"
+    },
+    {
+      "id": 23,
+      "type": "PreviewImage",
+      "pos": [
+        1320,
+        2470
+      ],
+      "size": [
+        520,
+        360
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 6
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": [],
+      "title": "Preview · без H3 моделей"
+    }
+  ],
+  "links": [
+    [
+      1,
+      10,
+      0,
+      11,
+      0,
+      "VIDEO"
+    ],
+    [
+      2,
+      11,
+      0,
+      20,
+      0,
+      "IMAGE"
+    ],
+    [
+      3,
+      11,
+      2,
+      20,
+      1,
+      "FLOAT"
+    ],
+    [
+      4,
+      20,
+      0,
+      21,
+      0,
+      "MASK"
+    ],
+    [
+      5,
+      21,
+      0,
+      22,
+      0,
+      "IMAGE"
+    ],
+    [
+      6,
+      20,
+      1,
+      23,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 4600,
+      "title": "MASK ONLY · paint and save serialized editor state",
+      "bounding": [
+        16,
+        76,
+        2408,
+        2818
+      ],
+      "color": "#35566b",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ths": {
+      "workflow_name": "Universal_Inpaint_Masked_Repair_MASK_ONLY",
+      "source_latent_inpaint": true,
+      "user_mask_is_authoritative": true,
+      "exact_pixels_outside_mask": true,
+      "h3_internal_fps": 24.0,
+      "source_canvas_multiple": 32,
+      "output_fps": "source video FPS",
+      "output_audio": "source video audio passthrough",
+      "denoise_default": 0.65,
+      "denoise_note": "adjustable starting point; not a quality promise",
+      "models": {},
+      "mask_tracking_is_approximate": false,
+      "tracking_modes": [
+        "sam3",
+        "optical_flow",
+        "static"
+      ],
+      "h3_required": false
+    }
+  },
+  "version": 0.4
+}

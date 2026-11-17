@@ -1,0 +1,5 @@
+# MiniMax H3 nodes are part of a compatible ComfyUI core.  Keep this file
+# explicit and empty of torch/CUDA pins: the installer must not replace a
+# working ComfyUI runtime.  Install only if your selected ComfyUI build lacks
+# these packages and you have verified a compatible wheel yourself.
+av>=13.0

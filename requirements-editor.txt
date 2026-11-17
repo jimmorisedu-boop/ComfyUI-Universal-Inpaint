@@ -1,0 +1,7 @@
+# Universal Inpaint v0.1.0 — CPU/editor profile.
+# Installed by scripts/setup.py after a pip dry-run report proves that no
+# torch/CUDA package would change. ComfyUI's own environment remains the
+# authority for torch and any native video packages.
+numpy>=1.24
+Pillow>=10.0
+opencv-python-headless>=4.8

@@ -1,0 +1,25 @@
+import assert from "node:assert/strict";
+import { createMaskDiagnostics } from "../web/universal_mask_editor.js";
+
+const items = new Map();
+const storage = { getItem: (key) => items.get(key), setItem: (key, value) => items.set(key, value) };
+let frame = 0;
+const log = createMaskDiagnostics({ nodeId: 20, snapshot: () => ({ frame }), storage, limit: 4 });
+for (; frame < 7; frame++) log.record("frame", { frame });
+assert.deepEqual(log.report().events.map((item) => item.details.frame), [3, 4, 5, 6]);
+assert.deepEqual(log.report().events.map((item) => item.state.frame), [3, 4, 5, 6]);
+const copy = log.report(); copy.events[0].details.frame = -1;
+assert.equal(log.report().events[0].details.frame, 3, "export cannot mutate the recorder");
+log.dispose();
+const restored = createMaskDiagnostics({ nodeId: 20, snapshot: () => ({ frame: 8 }), storage, limit: 4 });
+restored.record("reload");
+assert.deepEqual(restored.report().events.map((item) => item.event), ["frame", "frame", "frame", "reload"]);
+assert.notEqual(restored.report().events[0].session, restored.report().session);
+restored.dispose();
+const isolated = createMaskDiagnostics({ nodeId: 21, storage });
+assert.equal(isolated.report().events.length, 0, "nodes do not share logs"); isolated.dispose();
+const unavailable = createMaskDiagnostics({ nodeId: 22, storage: { getItem() { throw Error("denied"); }, setItem() { throw Error("full"); } }, snapshot() { throw Error("detached DOM"); } });
+assert.doesNotThrow(() => { unavailable.record("failure"); unavailable.flush(); unavailable.dispose(); });
+assert.equal(unavailable.report().events.length, 0);
+log.record("too late"); assert.equal(log.report().events.length, 4);
+console.log("universal_mask_editor_diagnostics: PASS");
