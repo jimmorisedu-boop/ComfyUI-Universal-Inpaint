@@ -447,7 +447,7 @@ def _offload_model(model: Any) -> None:
         pass
 
 
-def _predict_native(image: np.ndarray, event: Mapping[str, Any]) -> np.ndarray:
+def _predict_native(image: np.ndarray, event: Mapping[str, Any], *, keep_loaded: bool = False) -> np.ndarray:
     """Run one box or point prompt through the native interactive predictor."""
 
     config = _native_config()
@@ -488,6 +488,7 @@ def _predict_native(image: np.ndarray, event: Mapping[str, Any]) -> np.ndarray:
     rgb = np.asarray(np.round(np.clip(np.nan_to_num(array[..., :3]), 0.0, 1.0) * 255.0), dtype=np.uint8)
     pil_image = Image.fromarray(rgb, mode="RGB")
     model = None
+    completed = False
     try:
         model = getter(config)
         load_models_gpu = getattr(model_management, "load_models_gpu", None)
@@ -556,6 +557,7 @@ def _predict_native(image: np.ndarray, event: Mapping[str, Any]) -> np.ndarray:
                 "(all candidates were empty or filled the selection)"
             )
         _score, _index, selected = max(valid, key=lambda item: (item[0], -item[1]))
+        completed = True
         return np.asarray(selected, dtype=bool)
     except SAM3UnavailableError:
         raise
@@ -564,16 +566,13 @@ def _predict_native(image: np.ndarray, event: Mapping[str, Any]) -> np.ndarray:
             f"SAM3 rectangle segmentation failed: {type(exc).__name__}: {exc}"
         ) from exc
     finally:
-        # Release per-image feature state before returning the ModelPatcher to
-        # its offload device.  The model cache may retain CPU weights, but it
-        # must not permanently occupy VRAM between H3 requests.
-        try:
-            if "state" in locals():
-                del state
-        except Exception:
-            pass
-        _offload_model(model)
-        gc.collect()
+        if "state" in locals():
+            del state
+        # Interactive previews run on Comfy's queue. Keep a successful model
+        # registered so Comfy can reuse it or evict it under VRAM pressure.
+        if not (keep_loaded and completed):
+            _offload_model(model)
+            gc.collect()
 
 
 def refine_rectangle_sam3(image: np.ndarray, event: Mapping[str, Any]) -> np.ndarray:

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — SAM3 point selection
+
+- Click an object for a single-frame SAM3 preview, with positive and negative
+  point tools for refinement. Video tracking and H3 remain explicit actions.
+- Reuse the loaded source frames on each SAM3 preview. The scoped queue job
+  returns the selected frame's mask and brush baseline, and ComfyUI manages
+  reuse and eviction of the SAM3 model between clicks.
+- Keep point prompts through saving and history, show their markers on the
+  frame, and retain brush corrections when selecting again or tracking.
+- Copying manual corrections retains the original verified point seed.
+- Added point interaction regression coverage and real-video acceptance notes.
+
 ## 0.1.2 — SAM3 undo/redo readiness
 
 - Fixed undo/redo of brush corrections unnecessarily discarding the approved

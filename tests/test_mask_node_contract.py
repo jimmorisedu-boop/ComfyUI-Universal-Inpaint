@@ -117,3 +117,64 @@ def test_invalid_json_still_raises_instead_of_becoming_recovery_preview(monkeypa
         THSUniversalMaskEditor().run(source, "{not-json", tracking_mode="static")
     assert type(exc_info.value) is MaskDataError
     assert _ExecutionBlocker.calls == []
+
+
+def test_scoped_sam3_frame_returns_only_changed_masks_and_a_trackable_seed(monkeypatch):
+    import base64
+    import io
+    import json
+
+    from PIL import Image
+    from ths_universal_inpaint import mask_sam3_video as video
+
+    _install_execution_blocker(monkeypatch)
+    source = np.zeros((3, 24, 64, 3), dtype=np.float16)[:, :, ::2, :]
+    source[1] = 0.25
+    source[2, 0, 0] = [np.nan, np.inf, -np.inf]
+    native_mask = np.zeros(source.shape[1:3], dtype=bool)
+    native_mask[4:18, 6:20] = True
+    calls = []
+
+    def predict(image, prompt, *, keep_loaded):
+        calls.append(keep_loaded)
+        np.testing.assert_array_equal(image, source[1])
+        assert prompt["labels"] == [1, 0]
+        return native_mask
+
+    def reject_full_preview(*args, **kwargs):
+        pytest.fail("one click must not build or encode a full-clip preview")
+
+    video.clear_sam3_video_cache()
+    monkeypatch.setattr(video, "_predict_native", predict)
+    for name in ("build_mask_sequence", "encode_preview_assets", "cache_preview_assets", "_preview_tensor"):
+        monkeypatch.setattr(mask_nodes, name, reject_full_preview)
+    document = {
+        "editor_request": mask_nodes.SAM3_FRAME_PREVIEW,
+        "tracking_mode": "sam3",
+        "source": {"frames": 3, "width": 32, "height": 24, "fingerprint": frame_fingerprint(source)},
+        "sam3": {"action": "frame", "frame": 1, "prompt": {"frame": 1, "points": [[.3, .3], [.8, .8]], "labels": [1, 0]}},
+        "frames": {"1": {"inherit": True, "events": [{"type": "rect", "mode": "add", "x": .8, "y": .8, "w": .1, "h": .1}]}},
+    }
+    result = THSUniversalMaskEditor().run(source, json.dumps(document), tracking_mode="sam3", grow=0, feather=0)
+    ui = result["ui"]
+    assert calls == [True]
+    assert all(isinstance(output, _ExecutionBlocker) for output in result["result"])
+    assert "universal_mask_frames" not in ui and "universal_mask_preview" not in ui
+    patch, = ui["universal_mask_frame_patch"]
+    assert patch["frame"] == 1
+
+    def pixels(name):
+        payload = base64.b64decode(patch[name].split(",", 1)[1])
+        return np.asarray(Image.open(io.BytesIO(payload))) > 0
+
+    np.testing.assert_array_equal(pixels("edit_base"), native_mask)
+    assert pixels("mask").sum() > native_mask.sum()
+    saved = json.loads(ui["universal_mask_data"][0])
+    assert "editor_request" not in saved
+    token = saved["sam3"]["seed_token"]
+    normalized = np.nan_to_num(source.astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0)
+    assert video._lookup_seed(normalized, saved, 1, token).frame == 1
+    normalized[2, 1, 1, 0] = 0.5
+    with pytest.raises(video.SAM3VideoError, match="does not belong"):
+        video._lookup_seed(normalized, saved, 1, token)
+    assert ui["universal_mask_meta"][0]["sam3"]["track_ready"] is False

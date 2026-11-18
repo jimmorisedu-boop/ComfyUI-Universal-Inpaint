@@ -8,31 +8,47 @@ actual Comfy execution still returns native IMAGE/MASK tensors.
 from __future__ import annotations
 
 import hashlib
+import time
 from typing import Any
 
 import numpy as np
 
 from .mask_core import (
+    MAX_FRAMES,
+    MAX_PREVIEW_SIZE,
     MaskDataError,
     MaskRefinementError,
     MaskSourceMismatch,
+    _data_url,
+    _json_value,
+    _mask_png_payload,
     build_mask_sequence,
     cache_preview_assets,
     canonical_mask_data,
     encode_preview_assets,
     frame_fingerprint,
     optical_flow_available,
+    parse_mask_data,
+    postprocess_mask,
+    rasterize_events,
     raw_tracking_cache_info,
 )
-from .mask_sam3_video import SAM3VideoError
+from .mask_sam3_video import SAM3VideoError, _overlay_events, _prompt_events, calculate_frame
 
 
-def _numpy_images(images: Any) -> np.ndarray:
+SAM3_FRAME_PREVIEW = "sam3_frame_v1"
+
+
+def _image_array(images: Any) -> np.ndarray:
     if hasattr(images, "detach"):
         images = images.detach().to(device="cpu", dtype=getattr(images, "dtype", None)).numpy()
     images = np.asarray(images)
     if images.ndim != 4:
         raise MaskDataError("images must have shape T x H x W x C")
+    return images
+
+
+def _normalize_images(images: np.ndarray) -> np.ndarray:
     return np.nan_to_num(images.astype(np.float32, copy=False), nan=0.0, posinf=1.0, neginf=0.0)
 
 
@@ -177,11 +193,68 @@ def _blocked_source_response(
     }
 
 
-def _source_signature(images: np.ndarray) -> str:
+def _source_signature(images: np.ndarray, fingerprint: str) -> str:
     count, height, width = map(int, images.shape[:3])
     # Dimensions/count intentionally define the session binding.  The digest
     # is stable, cheap, and does not copy or upload any pixel data.
-    return hashlib.sha1(f"{count}:{height}:{width}:{frame_fingerprint(images)}".encode("ascii")).hexdigest()[:16]
+    return hashlib.sha1(f"{count}:{height}:{width}:{fingerprint}".encode("ascii")).hexdigest()[:16]
+
+
+def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, start_frame, end_frame):
+    """Return the changed mask and edit base over the browser's cached source."""
+    count, height, width = map(int, source.shape[:3])
+    if count > MAX_FRAMES:
+        raise MaskDataError("clips longer than 4096 frames are not supported by this editor")
+    parsed = parse_mask_data(document, count, width=width, height=height, fingerprint=fingerprint)
+    sam3 = parsed.get("sam3", {})
+    frame = sam3.get("frame")
+    if sam3.get("action") != "frame" or frame is None or not _prompt_events(parsed, frame):
+        return None
+    blocker = _execution_blocker(None)
+    if blocker is None:
+        return None
+    start = max(0, int(start_frame))
+    end = count - 1 if int(end_frame) < 0 else min(count - 1, int(end_frame))
+    if not start <= frame <= end:
+        return None  # Use the ordinary range validation and recovery path.
+
+    t0 = time.perf_counter()
+    base, seed, sam3_meta = calculate_frame(source, parsed, frame=frame, interactive=True)
+    prediction_ms = round((time.perf_counter() - t0) * 1000)
+    base = base.astype(np.float32)
+    events = _overlay_events(parsed, frame)
+    drawn = rasterize_events(events, height, width, _normalize_images(source[frame]), base) if events else base
+    mask = postprocess_mask(drawn[None], grow=int(grow), feather=int(feather))[0]
+    scale = min(1.0, MAX_PREVIEW_SIZE / max(width, height))
+    size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    patch = {
+        "frame": frame,
+        "mask": _data_url(_mask_png_payload(mask, size), "image/png"),
+        "edit_base": _data_url(_mask_png_payload(base, size), "image/png"),
+    }
+    bound_source = {"frames": count, "width": width, "height": height, "fingerprint": fingerprint}
+    parsed["source"] = bound_source
+    sam3["seed_token"] = seed.token
+    meta = {
+        "version": 1,
+        "source": bound_source,
+        "fps": float(fps or 24.0),
+        "tracking_mode": "sam3",
+        "start_frame": start,
+        "end_frame": end,
+        "anchors": [frame],
+        "has_mask": bool(np.any(mask > 1e-5)),
+        "sam3": sam3_meta,
+        "frame_preview_ms": prediction_ms,
+    }
+    return {
+        "ui": {
+            "universal_mask_frame_patch": [patch],
+            "universal_mask_meta": [meta],
+            "universal_mask_data": [canonical_mask_data(parsed, count, width=width, height=height, fingerprint=fingerprint)],
+        },
+        "result": (blocker, blocker),
+    }
 
 
 def _opencv_refinement_available() -> bool:
@@ -257,11 +330,23 @@ class THSUniversalMaskEditor:
     def run(self, images, mask_data="{}", tracking_mode="optical_flow", grow=8, feather=4,
             start_frame=0, end_frame=-1, fps=24.0, unique_id=None):
         del unique_id  # token isolation uses the per-node output session signature
-        source = _numpy_images(images)
+        source = _image_array(images)
         count, height, width = map(int, source.shape[:3])
         fingerprint = frame_fingerprint(source)
-        session = _source_signature(source)
+        session = _source_signature(source, fingerprint)
+        editor_frame_preview = False
         try:
+            if str(tracking_mode) == "sam3":
+                mask_data = _json_value(mask_data)
+                editor_frame_preview = mask_data.get("editor_request") == SAM3_FRAME_PREVIEW
+                if editor_frame_preview:
+                    response = _sam3_frame_preview(
+                        source, mask_data, fingerprint=fingerprint, fps=fps, grow=grow, feather=feather,
+                        start_frame=start_frame, end_frame=end_frame,
+                    )
+                    if response is not None:
+                        return response
+            source = _normalize_images(source)
             mask, parsed, anchors, edit_bases, sam3_meta = build_mask_sequence(
                 source,
                 mask_data,
@@ -275,6 +360,12 @@ class THSUniversalMaskEditor:
                 return_sam3_meta=True,
             )
         except (MaskSourceMismatch, MaskRefinementError, SAM3VideoError) as exc:
+            if editor_frame_preview and not isinstance(exc, MaskSourceMismatch):
+                # The editor already has the source. Let its scoped execution
+                # error handler clear readiness without rebuilding the clip.
+                raise
+            if editor_frame_preview:
+                source = _normalize_images(source)
             return _blocked_source_response(
                 source,
                 session=session,

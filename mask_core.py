@@ -343,10 +343,10 @@ def frame_fingerprint(images: np.ndarray) -> str:
     # Four temporal samples and at most a 32x32 spatial grid keep this cheap
     # even for 4K clips while distinguishing same-sized clips in practice.
     indices = np.linspace(0, array.shape[0] - 1, min(4, array.shape[0]), dtype=np.int64)
-    sample = array[indices]
-    y_step = max(1, sample.shape[1] // 32)
-    x_step = max(1, sample.shape[2] // 32)
-    sample = np.nan_to_num(sample[:, ::y_step, ::x_step, :3], nan=0.0, posinf=1.0, neginf=0.0)
+    y_step = max(1, array.shape[1] // 32)
+    x_step = max(1, array.shape[2] // 32)
+    sample = array[indices, ::y_step, ::x_step, :3].astype(np.float32, copy=False)
+    sample = np.nan_to_num(sample, nan=0.0, posinf=1.0, neginf=0.0)
     quantized = np.asarray(np.clip(sample, 0.0, 1.0) * 255.0, dtype=np.uint8)
     import hashlib
     return hashlib.sha1(quantized.tobytes()).hexdigest()[:20]

@@ -212,7 +212,7 @@ const configuredWidgets = [
 ];
 const configuredNode = { id: 45, widgets: configuredWidgets, graph: { setDirtyCanvas() {} }, addDOMWidget(_name, _type, root) { this.root = root; } };
 const configuredEditor = createUniversalMaskEditor(configuredNode, { app: null, api: null });
-assert.equal(configuredEditor.state.mode, "rect");
+assert.equal(configuredEditor.state.mode, "sam_point");
 assert.equal(configuredEditor.state.grabcut, true);
 const legacyDocument = {
     version: 1,
@@ -263,7 +263,7 @@ const sam3Document = {
 configuredWidgets[0].value = JSON.stringify(sam3Document);
 configuredWidgets[1].value = "sam3";
 configuredNode.onConfigure({});
-assert.equal(configuredEditor.state.mode, "rect", "configured SAM3 mode selects the seed rectangle");
+assert.equal(configuredEditor.state.mode, "sam_point", "configured SAM3 mode selects click preview");
 assert.equal(configuredEditor.state.grabcut, true);
 assert.equal(configuredEditor.state.refineMethod, "sam3");
 assert.match(configuredEditor.status.textContent, /SAM3/);
@@ -275,7 +275,7 @@ assert.equal(configuredEditor.state.mode, "brush");
 assert.equal(configuredEditor.state.grabcut, false);
 assert.doesNotMatch(configuredEditor.status.textContent, /SAM3/);
 configuredTracking.value = "sam3"; configuredTracking.dispatchEvent({ type: "change" });
-assert.equal(configuredEditor.state.mode, "rect");
+assert.equal(configuredEditor.state.mode, "sam_point");
 assert.match(configuredEditor.status.textContent, /SAM3/);
 configuredEditor.destroy();
 

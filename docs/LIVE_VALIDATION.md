@@ -1,4 +1,57 @@
-# Live ComfyUI verification — 2026-11-18
+# Live ComfyUI verification
+
+## Faster SAM3 preview — 2026-11-19 (Europe/Moscow)
+
+Editor build `20261119-r13-sam3-preview` was tested in the actual local
+ComfyUI frontend on the same 119-frame, 1080×1920 clip. With source frames
+loaded, click-to-overlay time was 6.02 seconds with initial model loading.
+Warm positive, negative and replacement clicks took 2.07, 2.48 and 2.03
+seconds respectively. The earlier jobs took 34.45–36.43 seconds.
+
+The three shirt masks were pixel-identical to the earlier previews. The
+hair region differed by three preview pixels (99.91% intersection over union).
+The separate Track video action produced 119 nonempty native SAM3 masks.
+The seed frame retained a brush mark, and the mark was absent on frame 60.
+The preview jobs contained only the three source and mask nodes, and the
+browser test recorded zero JavaScript errors. All 114 Python tests and nine
+frontend suites passed.
+
+## SAM3 point selection — 2026-11-19 (Europe/Moscow)
+
+Editor build `20261119-r12-sam3-points` was installed with served-file hash
+verification. The same actual ComfyUI frontend/backend and 119-frame,
+1080×1920, 30 FPS video were used for these additional checks:
+
+- Clicking the shirt produced an overlaid object mask on frame 1 only.
+  Positive and negative points submitted new single-frame previews; their
+  labels and coordinates reached the native predictor. Tracking stayed off.
+- Selecting hair with a new click replaced the point prompt. A deliberate
+  brush mark remained in the document and rendered preview.
+- Explicit Track video produced 119 nonempty masks using native SAM3
+  (`cache_hit=false`, `native_tracker_add_new_mask`), in 80.2 seconds.
+  The seed frame retained its brush mark; the mark was not a tracking prompt.
+- After leaving fullscreen at 75% graph zoom, brush/cursor centres agreed
+  within 0.01 CSS pixels. Point selection agreed with the requested source
+  coordinate within 0.00001. Undo/redo preserved the brush event.
+- No JavaScript errors were recorded. These jobs submitted only LoadVideo,
+  GetVideoComponents and the mask editor; H3 was not run.
+
+Single-frame previews took 34–37 seconds end-to-end on this setup, including
+ComfyUI's current video/output preparation. This is a calculated preview,
+not instant hover segmentation. Model quality still needs visual inspection;
+adding a point can alter the whole predicted object boundary.
+
+The first source-preview attempt exhausted available system commit memory.
+With the queue idle, ComfyUI's model/execution cache was freed through its
+normal API. The full-resolution retry and all subsequent jobs succeeded;
+the video was not downscaled for this acceptance run. This is not a fix for
+the existing full-batch preview memory cost.
+
+Nine frontend regression suites and 37 focused Python mask/SAM3/node-contract
+tests passed. The additional manual-key copy fix was regression-tested and
+installed with HTTP hash verification; it does not change SAM3 inference.
+
+## Earlier rectangle and layout acceptance
 
 Version 0.1.2, editor build `20261118-r11b-sam3-history`.
 

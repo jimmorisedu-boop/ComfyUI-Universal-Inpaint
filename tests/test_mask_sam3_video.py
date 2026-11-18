@@ -54,6 +54,42 @@ def test_frame_action_is_separate_and_never_calls_flow(monkeypatch):
     assert parsed["sam3"]["action"] == "frame"
 
 
+def test_point_preview_preserves_prompt_and_tracks_only_on_explicit_action(monkeypatch):
+    import copy
+    images = _clip()
+    selected = np.zeros(images.shape[1:3], dtype=bool)
+    selected[4:12, 6:15] = True
+    calls = []
+    monkeypatch.setattr(video, "_predict_native", lambda image, event: (calls.append(event), selected.copy())[1])
+    monkeypatch.setattr(core, "_flow_between", lambda *args: (_ for _ in ()).throw(AssertionError("Optical Flow must not run")))
+    track_calls = []
+    def track(images, prompts, *, seed, start, end, direction):
+        track_calls.append(prompts)
+        return {i: selected.copy() for i in range(start, end + 1)}
+    monkeypatch.setattr(video, "_native_track", track)
+    doc = {"tracking_mode": "sam3", "frames": {}, "sam3": {
+        "action": "frame", "frame": 1, "direction": "both",
+        "prompt": {"frame": 1, "points": [[.3, .3], [.8, .8]], "labels": [1, 0]},
+    }}
+    video.clear_sam3_video_cache()
+    mask, parsed, anchors, bases, meta = core.build_mask_sequence(
+        images, doc, tracking_mode="sam3", grow=0, feather=0,
+        return_edit_bases=True, return_sam3_meta=True)
+    assert parsed["sam3"]["prompt"] == doc["sam3"]["prompt"]
+    assert calls[0]["points"] == [[.3, .3], [.8, .8]] and calls[0]["labels"] == [1, 0]
+    assert not track_calls and meta["computed_frames"] == [1]
+    assert meta["frame_ready"] and not meta["track_ready"]
+    tracked = copy.deepcopy(doc)
+    tracked["sam3"].update(action="track", seed_token=meta["seed_token"])
+    tracked["frames"]["2"] = {"inherit": True, "events": [{"type": "stroke", "mode": "erase", "radius": .12, "points": [[.3,.3]]}]}
+    result, _, _, _, tracked_meta = core.build_mask_sequence(
+        images, tracked, tracking_mode="sam3", grow=0, feather=0,
+        return_edit_bases=True, return_sam3_meta=True)
+    assert len(track_calls) == 1 and tracked_meta["track_ready"]
+    assert np.array_equal(result[1] > 0, selected)
+    assert result[2].sum() < selected.sum(), "manual eraser must survive point-based tracking"
+
+
 def test_track_requires_fresh_seed_and_uses_native_only(monkeypatch):
     images = _clip()
     monkeypatch.setattr(video, "_predict_native", lambda image, event: np.pad(

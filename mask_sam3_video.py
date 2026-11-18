@@ -157,12 +157,22 @@ def _native_video_modules() -> tuple[Any, Any, Any, Any]:
         raise SAM3VideoError(_VIDEO_ERROR) from exc
 
 
-def _source_digest(images: np.ndarray) -> str:
-    array = np.ascontiguousarray(np.asarray(images))
+def _source_digest(images: np.ndarray, *, normalize: bool = False) -> str:
+    array = np.asarray(images)
     digest = hashlib.sha256()
     digest.update(repr(tuple(int(value) for value in array.shape)).encode("ascii"))
-    digest.update(str(array.dtype).encode("ascii"))
-    digest.update(memoryview(array).cast("B"))
+    if normalize:
+        # Match the queued track's canonical float32 bytes, with at most one
+        # frame's scratch space even for noncontiguous or nonfinite input.
+        digest.update(b"float32")
+        for frame in array:
+            frame = np.ascontiguousarray(frame, dtype=np.float32)
+            if not np.isfinite(frame).all():
+                frame = np.nan_to_num(frame, nan=0.0, posinf=1.0, neginf=0.0)
+            digest.update(memoryview(frame).cast("B"))
+    else:
+        digest.update(str(array.dtype).encode("ascii"))
+        digest.update(memoryview(np.ascontiguousarray(array)).cast("B"))
     return digest.hexdigest()
 
 
@@ -297,10 +307,11 @@ def calculate_frame(
     parsed: Mapping[str, Any],
     *,
     frame: int,
+    interactive: bool = False,
 ) -> tuple[np.ndarray, SAM3Seed, dict[str, Any]]:
     """Calculate one native SAM3 seed frame, with no propagation."""
 
-    images = np.asarray(images, dtype=np.float32)
+    images = np.asarray(images) if interactive else np.asarray(images, dtype=np.float32)
     if images.ndim != 4 or images.shape[0] < 1:
         raise SAM3VideoError("SAM3 frame calculation requires T x H x W x C images")
     frame = int(frame)
@@ -318,7 +329,7 @@ def calculate_frame(
         raise SAM3VideoError(meta["error"], meta=meta)
     event = matching[0]
     box = _normal_box(event) if not isinstance(event.get("points"), (list, tuple)) else (0.0, 0.0, 1.0, 1.0)
-    source_digest = _source_digest(images)
+    source_digest = _source_digest(images, normalize=interactive)
     prompt_digest = _prompt_digest(prompts, frame)
     cache_identity = (source_digest, int(frame), prompt_digest, box)
     with _CACHE_LOCK:
@@ -332,7 +343,12 @@ def calculate_frame(
                 return mask, cached, meta
     _throw_interrupted()
     try:
-        mask = np.asarray(_predict_native(images[frame], event), dtype=bool)
+        if interactive:
+            selected_image = np.nan_to_num(images[frame].astype(np.float32, copy=False), nan=0.0, posinf=1.0, neginf=0.0)
+            predicted = _predict_native(selected_image, event, keep_loaded=True)
+        else:
+            predicted = _predict_native(images[frame], event)
+        mask = np.asarray(predicted, dtype=bool)
     except SAM3UnavailableError as exc:
         meta = {"frame_ready": False, "track_ready": False, "frame": frame,
                 "seed_token": "", "direction": "forward", "computed_frames": [],

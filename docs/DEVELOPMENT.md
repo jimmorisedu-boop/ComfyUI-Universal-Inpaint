@@ -32,6 +32,14 @@ python -c "import importlib.util,sys; root='.'; spec=importlib.util.spec_from_fi
 - Preserve source/mask geometry and exact outside-mask compositing contracts.
 - SAM3 remains two-step (frame seed, then range tracking). Do not add an
   implicit Optical Flow fallback to a native SAM3 error.
+- Point selection and positive/negative corrections automatically request only
+  a frame preview. Range tracking and H3 must still require separate clicks.
+  Preserve `sam3.prompt` through serialization/history; changing a point
+  invalidates the old frame proof. Brush corrections must not change the prompt.
+- `editor_request: sam3_frame_v1` belongs only to the scoped queue request.
+  Its response patches the selected mask and edit base over loaded source
+  frames. Track and the final graph use normal node outputs and verify the
+  seed against the canonical digest of the complete clip.
 - Keep mask-only workflows free of H3 model nodes so they work without H3.
 - New workflows must use placeholders, not personal media names, prompt text,
   mask history, seed tokens, source fingerprints, host IDs or local paths.
