@@ -1,4 +1,5 @@
 /* global document, window, Image */
+import { createWindowControls, trialPrompt } from "./h3_window.js";
 import { previewPrompt } from "./preview_prompt.js";
 
 // Universal mask editor for ComfyUI.  This file intentionally has no framework
@@ -21,7 +22,7 @@ const MAX_POINTS_PER_STROKE = 4096;
 const MAX_TOTAL_POINTS = 65536;
 const MAX_PREVIEWS = 48;
 const MAX_HISTORY = 80;
-const EDITOR_BUILD = "20261119-r14b-sam3-context";
+const EDITOR_BUILD = "20261120-h3-window";
 const SAM3_FRAME_PREVIEW = "sam3_frame_v1";
 const MAX_SAM3_OBJECTS = 8;
 
@@ -371,6 +372,11 @@ function addStyles(root) {
       .ths-mask-editor .ths-mask-tools { display: flex; flex-direction: column; align-items: center; gap: 6px; padding-block: 4px; }
       .ths-mask-editor .ths-mask-tools > :nth-child(5) { margin-block-start: 12px; }
       .ths-mask-editor .ths-canvas-wrap { position: relative; min-width: 0; min-height: 220px; background: ${COLORS.panel}; border: 1px solid ${COLORS.borderSoft}; border-radius: 6px; overflow: hidden; }
+      .ths-mask-editor .ths-h3-outline { box-sizing:border-box; position:absolute; display:none; pointer-events:none; border:1px dashed #ffc165; }
+      .ths-mask-editor .ths-h3-outline > span { position:absolute; right:4px; top:4px; color:#ffc165; background:#161616df; padding:1px 4px; font-size:10px; }
+      .ths-mask-editor .ths-h3-outline button { position:absolute; width:18px; height:18px; padding:0; border:2px solid #ffc165; background:#242424; pointer-events:auto; cursor:nwse-resize; touch-action:none; -webkit-user-select:none; user-select:none; }
+      .ths-mask-editor .ths-h3-nw { left:0; top:0; }
+      .ths-mask-editor .ths-h3-se { right:0; bottom:0; }
       .ths-mask-editor .ths-mask-progress { position: absolute; z-index: 3; inset: 0; display: none; place-items: center; padding: 16px; pointer-events: none; }
       .ths-mask-editor .ths-mask-progress-card { box-sizing: border-box; display: grid; gap: 8px; width: min(100%, 300px); padding: 14px 16px; border: 1px solid ${COLORS.border}; border-radius: 8px; background: ${COLORS.panel}; box-shadow: 0 3px 16px #0008; }
       .ths-mask-editor .ths-mask-progress-title { color: ${COLORS.text}; font-size: 13px; font-weight: 650; }
@@ -714,7 +720,7 @@ export function createUniversalMaskEditor(node, options = {}) {
     const inspector = createElement("aside", {}, "ths-mask-inspector");
     inspector.setAttribute("aria-label", "Настройки маски и расчёт");
     const inspectorBody = createElement("div", {}, "ths-mask-inspector-body");
-    inspectorBody.append(selectionPanel, edgesPanel, trackingPanel, editPanel);
+    inspectorBody.append(selectionPanel, edgesPanel, trackingPanel);
     inspector.append(inspectorBody, exportPanel);
     viewRow.append(zoomGroup);
     toolPanel.append(tools.brush, tools.erase, tools.rect, tools.polygon, undo, redo);
@@ -766,6 +772,11 @@ export function createUniversalMaskEditor(node, options = {}) {
         pendingRequestKind: "", apiListeners: [],
     };
     if (node.properties?.__thsPreviousMask && typeof node.properties.__thsPreviousMask === "object") state.previousMaskBackup = clone(node.properties.__thsPreviousMask);
+
+    const crop = createWindowControls({node, state, section, labelControl, canvasWrap, geometry, button, redraw:draw});
+    inspectorBody.append(crop.panel, editPanel);
+    exportPanel.append(crop.trial, queue, queueHint);
+    crop.trial.addEventListener("click", () => requestQueue(true));
 
     function diagnosticState() {
         const source = (item) => item ? { frames: item.frames, width: item.width, height: item.height, fingerprint: item.fingerprint } : null;
@@ -917,7 +928,7 @@ export function createUniversalMaskEditor(node, options = {}) {
     }
 
     function requestLabel(pending) {
-        if (pending === state.pendingH3) return "Запуск H3";
+        if (pending === state.pendingH3) return pending.trial ? "Проба H3" : "Запуск H3";
         if (pending.sam3Action === "frame") return "Расчёт кадра SAM3";
         if (pending.sam3Action === "track") return "Трекинг SAM3";
         if (pending.kind === "refinement") return "Уточнение маски";
@@ -1032,6 +1043,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         restorePrevious.style.display = state.previousMaskBackup ? "inline-flex" : "none";
         recoveryActions.style.display = state.pendingSource || state.previousMaskBackup ? "flex" : "none";
         refineMethod.disabled = Boolean(state.pendingPreview || state.pendingH3 || modeIsSam3);
+        crop.refresh(Boolean(actionBlocked() || state.pendingPreview || state.pendingH3));
         updateMaskSettingTooltips();
         if (modeIsSam3) {
             queueHint.textContent = trackReady ? "Трек готов · H3 доступен" : frameReady ? "Кадр готов · нажмите «Отследить видео»" : "Сначала рассчитайте кадр SAM3";
@@ -1407,6 +1419,7 @@ export function createUniversalMaskEditor(node, options = {}) {
 
     function draw() {
         const preview = selectedPreview();
+        crop.place(state.missingFrame ? null : geometry());
         if (!ctx || !preview?.sourceImage?.naturalWidth || state.missingFrame) {
             ctx?.clearRect?.(0, 0, canvas.width, canvas.height);
             empty.style.display = "grid"; brushCursor.style.display = "none"; return;
@@ -1486,6 +1499,7 @@ export function createUniversalMaskEditor(node, options = {}) {
     }
 
     function updateReadouts() {
+        crop.refresh();
         const count = Math.max(1, state.frameCount); const frame = clamp(Math.round(state.frame), 0, count - 1);
         frameReadout.textContent = `Кадр ${frame + 1} / ${count}`; if (document.activeElement !== direct) direct.value = String(frame + 1); slider.max = String(count - 1); slider.value = String(frame);
         const seconds = state.fps > 0 ? frame / state.fps : 0; const duration = state.fps > 0 ? (count - 1) / state.fps : 0;
@@ -2423,7 +2437,9 @@ export function createUniversalMaskEditor(node, options = {}) {
         setStatus("Отмена своего запроса отправлена…", "warn");
         return true;
     }
-    async function requestQueue() {
+    async function requestQueue(trial = false) {
+        trial = trial === true;
+        if (trial && (crop.trial.disabled || !crop.span)) return false;
         if (state.destroyed) return false;
         if (state.pendingH3 || state.pendingPreview || state.refinementBusy) {
             setStatus("Дождитесь завершения текущего расчёта.", "warn");
@@ -2441,15 +2457,26 @@ export function createUniversalMaskEditor(node, options = {}) {
             setStatus("Очередь ComfyUI недоступна. Маска сохранена.", "warn");
             return false;
         }
-        state.pendingH3 = { promptId: null, revision: state.editRevision, snapshot: widgetSnapshot(node), submittedAt: Date.now() };
+        state.pendingH3 = { trial, promptId: null, revision: state.editRevision, snapshot: widgetSnapshot(node), submittedAt: Date.now() };
         state.pendingRequestKind = "h3";
         updateActionAvailability();
         try {
-            const result = await app.queuePrompt(0);
+            let result;
+            if (trial) {
+                const winId = crop.target()?.id;
+                const span = crop.span;
+                const frame = state.frame;
+                const prompt = await app.graphToPrompt(node.graph || app.graph);
+                const {target, scoped} = trialPrompt(prompt, winId, frame, span, state.frameCount);
+                state.pendingH3.compareId = target;
+                result = await queueApi.queuePrompt(0, scoped, {partialExecutionTargets:[target]});
+            } else {
+                result = await app.queuePrompt(0);
+            }
             if (result === false) throw new Error("Проверьте ошибки графа в ComfyUI.");
             setPendingPromptId("h3", result);
             if (!state.pendingH3?.promptId) finishPending("h3");
-            setStatus("H3 поставлен в очередь.", "ok");
+            setStatus(trial ? "Проба H3 поставлена в очередь." : "H3 поставлен в очередь.", "ok");
             return true;
         } catch (error) {
             finishPending("h3");
@@ -2640,7 +2667,11 @@ export function createUniversalMaskEditor(node, options = {}) {
         const pending = requestForEvent(detail);
         if (!pending) return;
         finishPending(pending === state.pendingH3 ? "h3" : "preview");
-        setStatus("Расчёт завершён.", "ok");
+        if (pending.trial) {
+            setStatus("Проба готова. Результат в ноде сравнения.", "ok");
+            const compare = node.graph?.getNodeById?.(Number(pending.compareId));
+            if (compare) { closeDialog(); app.canvas?.centerOnNode?.(compare); }
+        } else setStatus("Расчёт завершён.", "ok");
     });
     function destroy() {
         if (state.destroyed) return;

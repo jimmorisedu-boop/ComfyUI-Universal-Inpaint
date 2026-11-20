@@ -34,3 +34,6 @@ temp/
 *.pt
 *.pth
 *.ckpt
+
+# Screenshots prepared for the public V70 walkthrough.
+!docs/images/v70/*.png

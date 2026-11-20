@@ -1,5 +1,9 @@
 # Live ComfyUI verification
 
+## V70 model window and short H3 trials
+
+The editor's trial and full-run buttons were exercised in a local ComfyUI browser on a 56-frame, 544×576, 24 fps clip. The marked interval was frames 17–40. An automatic 256×256 window covered the mask. The trial showed frames 21–32 in the comparison node, and the frame numbers matched their positions in the original timeline. The instruction route then saved a 56-frame H.264 file at the source dimensions and frame rate. All 32 outside-interval frame pairs matched in the comparison cache. Separate reference-image and corrected-frame trials also completed for the same interval, with the corrected guide on original frame 27. Unit tests cover the cropped audio sample offset; this particular source clip had no audio track.
+
 ## Russian edit instructions — 2026-11-19 (Europe/Moscow)
 
 The V70 workbench was loaded in the actual local ComfyUI frontend with a

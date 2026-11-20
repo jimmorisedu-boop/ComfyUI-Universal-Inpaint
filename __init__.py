@@ -63,7 +63,9 @@ except ModuleNotFoundError as exc:  # mask_nodes.py is supplied beside this file
     _MASK_NODES = {}
     _MASK_NAMES = {}
 
-NODE_CLASS_MAPPINGS = {**_REPAIR_NODES, **_CORRECTED_FRAME_NODES, **_MASK_NODES, **_AUTO_PROMPT_NODES}
+from .h3_window import THSUniversalH3Window
+
+NODE_CLASS_MAPPINGS = {"THSUniversalH3Window": THSUniversalH3Window, **_REPAIR_NODES, **_CORRECTED_FRAME_NODES, **_MASK_NODES, **_AUTO_PROMPT_NODES}
 NODE_DISPLAY_NAME_MAPPINGS = {**_REPAIR_NAMES, **_CORRECTED_FRAME_NAMES, **_MASK_NAMES, **_AUTO_PROMPT_NAMES}
 
 # ComfyUI discovers the optional browser bundle from this relative directory.

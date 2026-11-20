@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 
+from .h3_window import mask_extent
 from .mask_core import (
     MAX_FRAMES,
     MAX_PREVIEW_SIZE,
@@ -421,6 +422,7 @@ class THSUniversalMaskEditor:
             "end_frame": count - 1 if int(end_frame) < 0 else min(count - 1, int(end_frame)),
             "anchors": sorted(int(frame) for frame in anchors),
             "has_mask": has_mask,
+            "h3_extent": mask_extent(mask) if has_mask else None,
             "preview_frames": len(previews),
             "all_frame_cache_available": bool(cache_info.get("available")),
             # Keep a short alias for clients that describe the capability as

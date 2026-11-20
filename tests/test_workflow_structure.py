@@ -235,7 +235,7 @@ def test_workbench_runs_three_h3_modes_through_one_mask_and_one_sampler():
     assert origin(24, "positive") == [61, 0]
     assert origin(24, "latent") == [61, 2]
     assert origin(24, "source_images") == origin(92, "source") == [11, 0]
-    assert origin(24, "mask") == origin(30, "mask") == origin(92, "repair_mask") == [20, 0]
+    assert origin(24, "mask") == origin(105, "mask") == origin(92, "repair_mask") == [20, 0]
     assert origin(80, "positive") == [24, 0]
     assert origin(80, "latent_image") == [56, 0]
     assert origin(100, "audio") == [11, 1]

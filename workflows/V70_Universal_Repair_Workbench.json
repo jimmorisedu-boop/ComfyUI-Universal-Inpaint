@@ -1,8 +1,8 @@
 {
   "id": "d021068d-52e1-5cd0-941a-7b08dd7ceb02",
   "revision": 1,
-  "last_node_id": 104,
-  "last_link_id": 62,
+  "last_node_id": 105,
+  "last_link_id": 69,
   "nodes": [
     {
       "id": 10,
@@ -67,13 +67,11 @@
           "type": "IMAGE",
           "links": [
             2,
-            3,
-            6,
             37,
             43,
-            46,
             50,
-            59
+            59,
+            63
           ]
         },
         {
@@ -81,7 +79,7 @@
           "type": "AUDIO",
           "links": [
             40,
-            47
+            65
           ]
         },
         {
@@ -90,7 +88,8 @@
           "links": [
             5,
             41,
-            52
+            52,
+            66
           ]
         },
         {
@@ -147,10 +146,10 @@
           "name": "edit_mask",
           "type": "MASK",
           "links": [
-            7,
             9,
             44,
-            60
+            60,
+            64
           ]
         },
         {
@@ -1113,6 +1112,12 @@
           "name": "repair_mask",
           "type": "MASK",
           "link": 9
+        },
+        {
+          "name": "work_window",
+          "type": "THS_H3_WINDOW",
+          "link": 68,
+          "shape": 7
         }
       ],
       "outputs": [
@@ -1360,6 +1365,12 @@
           "type": "FLOAT",
           "link": 52,
           "shape": 7
+        },
+        {
+          "name": "work_window",
+          "type": "THS_H3_WINDOW",
+          "link": 69,
+          "shape": 7
         }
       ],
       "outputs": [],
@@ -1491,6 +1502,12 @@
           "type": "IMAGE",
           "link": 62,
           "shape": 7
+        },
+        {
+          "name": "work_window",
+          "type": "THS_H3_WINDOW",
+          "link": 67,
+          "shape": 7
         }
       ],
       "outputs": [
@@ -1520,6 +1537,91 @@
         1
       ],
       "title": "03c · Исправленный кадр · номер в видео"
+    },
+    {
+      "id": 105,
+      "type": "THSUniversalH3Window",
+      "pos": [
+        40,
+        1400
+      ],
+      "size": [
+        200,
+        30
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 63
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 64
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 65
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "link": 66
+        },
+        {
+          "name": "probe_frame",
+          "type": "INT",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            3,
+            6,
+            46
+          ]
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": [
+            7
+          ]
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            47
+          ]
+        },
+        {
+          "name": "work_window",
+          "type": "THS_H3_WINDOW",
+          "links": [
+            67,
+            68,
+            69
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "THSUniversalH3Window"
+      },
+      "widgets_values": [
+        "{}"
+      ],
+      "title": "Область H3"
     }
   ],
   "links": [
@@ -1541,7 +1643,7 @@
     ],
     [
       3,
-      11,
+      105,
       0,
       30,
       0,
@@ -1557,7 +1659,7 @@
     ],
     [
       6,
-      11,
+      105,
       0,
       60,
       0,
@@ -1565,8 +1667,8 @@
     ],
     [
       7,
-      20,
-      0,
+      105,
+      1,
       30,
       1,
       "MASK"
@@ -1837,7 +1939,7 @@
     ],
     [
       46,
-      11,
+      105,
       0,
       102,
       0,
@@ -1845,8 +1947,8 @@
     ],
     [
       47,
-      11,
-      1,
+      105,
+      2,
       102,
       1,
       "AUDIO"
@@ -1970,6 +2072,62 @@
       24,
       7,
       "IMAGE"
+    ],
+    [
+      63,
+      11,
+      0,
+      105,
+      0,
+      "IMAGE"
+    ],
+    [
+      64,
+      20,
+      0,
+      105,
+      1,
+      "MASK"
+    ],
+    [
+      65,
+      11,
+      1,
+      105,
+      2,
+      "AUDIO"
+    ],
+    [
+      66,
+      11,
+      2,
+      105,
+      3,
+      "FLOAT"
+    ],
+    [
+      67,
+      105,
+      3,
+      24,
+      8,
+      "THS_H3_WINDOW"
+    ],
+    [
+      68,
+      105,
+      3,
+      92,
+      3,
+      "THS_H3_WINDOW"
+    ],
+    [
+      69,
+      105,
+      3,
+      104,
+      3,
+      "THS_H3_WINDOW"
     ]
   ],
   "groups": [

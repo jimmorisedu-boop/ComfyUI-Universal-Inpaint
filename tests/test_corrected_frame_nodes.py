@@ -60,7 +60,7 @@ def test_schema_contract_has_original_inputs_and_three_mode_selector():
         "corrected_frame",
     ]
     assert schema["required"]["frame_number"][1]["default"] == 1
-    assert list(schema["optional"]) == ["corrected_image"]
+    assert list(schema["optional"]) == ["corrected_image", "work_window"]
     assert THSUniversalCorrectedFrameGuide.RETURN_NAMES == (
         "positive",
         "guide_preview",

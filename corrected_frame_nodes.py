@@ -180,7 +180,7 @@ class THSUniversalCorrectedFrameGuide:
                 ),
                 "frame_number": ("INT", {"default": 1, "min": 1, "step": 1}),
             },
-            "optional": {"corrected_image": ("IMAGE",)},
+            "optional": {"corrected_image": ("IMAGE",), "work_window": ("THS_H3_WINDOW",)},
         }
 
     RETURN_TYPES = ("CONDITIONING", "IMAGE", "STRING")
@@ -198,6 +198,7 @@ class THSUniversalCorrectedFrameGuide:
         mode="without_reference",
         frame_number=1,
         corrected_image=None,
+        work_window=None,
     ):
         mode_value = _normalise_reference_mode(mode)
         if mode_value != CORRECTED_FRAME_MODE:
@@ -224,19 +225,27 @@ class THSUniversalCorrectedFrameGuide:
         except Exception as exc:  # pragma: no cover - only a broken Comfy install.
             raise RuntimeError("ComfyUI MiniMaxH3AddGuide is unavailable") from exc
 
+        guide = merged
+        native_index = frame_index
+        if work_window is not None:
+            if not work_window.first <= frame_index < work_window.stop:
+                raise ValueError(f"Исправленный кадр {frame_number} вне фрагмента. Выберите пробу рядом с ним.")
+            guide = work_window.crop(merged)
+            native_index -= work_window.first
+
         result = MiniMaxH3AddGuide.execute(
             positive=positive,
             latent=latent,
-            frame_idx=frame_index,
+            frame_idx=native_index,
             vae=vae,
-            image=_pad_h3_images(merged),
+            image=_pad_h3_images(guide),
         )
         values = _node_result(result)
         if not values or values[0] is None:
             raise ValueError("MiniMaxH3AddGuide returned no positive conditioning")
         status = (
             f"corrected-frame guide applied to original frame {frame_index + 1} "
-            f"(native frame_idx={frame_index})"
+            f"(native frame_idx={native_index})"
         )
         return values[0], merged, status
 

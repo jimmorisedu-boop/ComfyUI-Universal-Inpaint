@@ -1,15 +1,12 @@
 # ComfyUI Universal Inpaint
 
-[Русская инструкция](README_RU.md) · [Installation](docs/INSTALL.md) · [User guide (RU)](docs/USER_GUIDE_RU.md)
+[Русская инструкция](README_RU.md) · [Installation](docs/INSTALL.md) · [Illustrated V70 walkthrough (RU)](docs/USER_GUIDE_RU.md)
 
-Universal Inpaint is a portable ComfyUI custom-node repository for repairing a
-user-selected region of a short video while keeping the unmasked source path
-explicit. It is an alpha, composable workbench rather than a hosted service or
-a claim of universal video support.
+Repair a moving region in a video with a text instruction, a reference image, or an edited source frame. Select an object with SAM3 or paint a region for Optical Flow. V70 shows the model’s crop in the mask editor and lets you compare a short H3 trial before exporting the complete video.
 
-The repository is designed to be cloned directly under a ComfyUI checkout's
-`custom_nodes/` directory. The root `__init__.py` is the node entry point and
-`WEB_DIRECTORY = "./web"` serves the browser editor.
+[Open the V70 workflow](workflows/V70_Universal_Repair_Workbench.json) · [Follow the illustrated walkthrough (Russian)](docs/USER_GUIDE_RU.md)
+
+![V70 mask editor showing the tracked area, model crop and trial controls](docs/images/v70/flow-crop.png)
 
 ## What is included
 
@@ -77,12 +74,7 @@ deliberately separate from the node package so a manual clone remains useful.
 
 ## Limitations and evidence boundary
 
-The current editor acceptance covered one 119-frame, 1080×1920, 30 FPS portrait
-clip, including native SAM3 frame calculation/tracking and Optical Flow edits.
-That is bounded integration evidence, not a universal support or quality claim.
-No new H3 render was performed for this public checkout. H3 quality, speed,
-memory use, audio compatibility and model availability depend on the user's
-ComfyUI installation and are not guaranteed by the mask editor.
+Local tests covered SAM3 and Optical Flow on a 119-frame 1080×1920 clip. On a 56-frame 544×576 clip, the H3 trial ran in all three repair modes. The instruction route also exported the complete 24 fps video. Runtime and output quality depend on the installed models, sampler and hardware. [Validation notes](docs/LIVE_VALIDATION.md)
 
 Do not commit personal video, masks, prompts, model weights, browser debug
 exports, host paths or acceptance captures. The checked-in workflows contain

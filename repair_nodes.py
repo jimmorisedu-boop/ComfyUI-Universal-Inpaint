@@ -936,10 +936,16 @@ class THSUniversalRepairCompare:
             },
             "optional": {
                 "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 0.01}),
+                "work_window": ("THS_H3_WINDOW",),
             },
         }
 
-    def run(self, source, result, fps=24.0):
+    def run(self, source, result, fps=24.0, work_window=None):
+        source_count = len(source)
+        offset = 0
+        if work_window is not None and work_window.trial:
+            offset = work_window.edit_first
+            source = source[offset:work_window.edit_stop]
         if not hasattr(source, "shape") or not hasattr(result, "shape"):
             raise ValueError("source and result must be IMAGE tensors/arrays")
         if tuple(source.shape[:3]) != tuple(result.shape[:3]):
@@ -966,13 +972,16 @@ class THSUniversalRepairCompare:
         meta = {
             "version": 1,
             "fps": fps_value,
-            "frame_count": int(source_np.shape[0]),
+            "frame_count": source_count,
+            "trial": bool(work_window and work_window.trial),
             "width": int(source_np.shape[2]),
             "height": int(source_np.shape[1]),
             "cache_available": bool(cache_info.get("available")),
             "cache_session": cache_info.get("session"),
             "cache_error": cache_info.get("error"),
         }
+        if offset:
+            descriptors = [{**item, "frame": item["frame"] + offset} for item in descriptors]
         ui = {
             "universal_repair_compare_frames": descriptors,
             "universal_repair_compare_meta": [meta],
@@ -1039,14 +1048,33 @@ class THSUniversalMaskedComposite:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {"source": ("IMAGE",), "generated": ("IMAGE",), "repair_mask": ("MASK",)}}
+        return {"required": {"source": ("IMAGE",), "generated": ("IMAGE",), "repair_mask": ("MASK",)},
+                "optional": {"work_window": ("THS_H3_WINDOW",)}}
 
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("images",)
     FUNCTION = "run"
     CATEGORY = CATEGORY + "/Output"
 
-    def run(self, source, generated, repair_mask):
+    def run(self, source, generated, repair_mask, work_window=None):
+        if work_window is not None:
+            w = work_window
+            if tuple(source.shape[:3]) != w.shape or tuple(repair_mask.shape) != w.shape:
+                raise ValueError("H3 window does not belong to this source geometry.")
+            x, y, right, bottom = w.box
+            width, height = right - x, bottom - y
+            gw, gh = _h3_canvas_size(width, height)
+            if tuple(generated.shape[:3]) != (w.stop - w.first, gh, gw):
+                raise ValueError("Decoded H3 window does not match the planned time and pixel grid.")
+            edit = slice(w.edit_first, w.edit_stop)
+            decoded = generated[w.edit_first-w.first:w.edit_stop-w.first, :height, :width]
+            repaired = composite_exact(w.crop(source[edit]), decoded, w.crop(repair_mask[edit]))
+            if w.box == (0, 0, w.shape[2], w.shape[1]) and (w.trial or (w.edit_first == 0 and w.edit_stop == len(source))):
+                return (repaired,)
+            base = source[edit] if w.trial else source
+            output = base.clone() if _is_torch(base) else base.copy()
+            output[slice(None) if w.trial else edit, y:bottom, x:right] = repaired
+            return (output,)
         if _ndim(source) == _ndim(generated) == 4 and tuple(source.shape) != tuple(generated.shape):
             _, height, width, _ = source.shape
             canvas_width, canvas_height = _h3_canvas_size(width, height)
