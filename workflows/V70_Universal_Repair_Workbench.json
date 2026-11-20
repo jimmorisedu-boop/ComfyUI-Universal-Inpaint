@@ -2,7 +2,7 @@
   "id": "d021068d-52e1-5cd0-941a-7b08dd7ceb02",
   "revision": 1,
   "last_node_id": 104,
-  "last_link_id": 52,
+  "last_link_id": 62,
   "nodes": [
     {
       "id": 10,
@@ -72,7 +72,8 @@
             37,
             43,
             46,
-            50
+            50,
+            59
           ]
         },
         {
@@ -148,7 +149,8 @@
           "links": [
             7,
             9,
-            44
+            44,
+            60
           ]
         },
         {
@@ -176,7 +178,7 @@
       "type": "THSUniversalAutoPrompt",
       "pos": [
         1560,
-        40
+        252
       ],
       "size": [
         620,
@@ -197,6 +199,12 @@
           "name": "mask",
           "type": "MASK",
           "link": 44
+        },
+        {
+          "name": "repair_mode",
+          "type": "COMBO",
+          "link": 53,
+          "shape": 7
         }
       ],
       "outputs": [
@@ -223,14 +231,14 @@
         "preview_enabled": false
       },
       "widgets_values": [
-        "auto",
+        "instruction",
         "",
         "",
         3,
         0.6,
         false
       ],
-      "title": "03b · Автопромпт по контексту маски (локально)"
+      "title": "03b · Автопромпт · что изменить в видео?"
     },
     {
       "id": 30,
@@ -306,7 +314,8 @@
         24.0,
         17,
         5,
-        48000
+        48000,
+        false
       ],
       "title": "04 · Паддинг H3 17n+5 (реальные кадры не меняются)"
     },
@@ -335,7 +344,8 @@
             15,
             16,
             17,
-            18
+            18,
+            58
           ]
         }
       ],
@@ -808,7 +818,7 @@
     },
     {
       "id": 61,
-      "type": "THSUniversalH3RepairConditioning",
+      "type": "THSUniversalH3ReferenceConditioning",
       "pos": [
         300,
         1240
@@ -866,6 +876,21 @@
           }
         },
         {
+          "name": "mode",
+          "type": "COMBO",
+          "link": 54,
+          "widget": {
+            "name": "mode"
+          },
+          "shape": 7
+        },
+        {
+          "name": "reference_image",
+          "type": "IMAGE",
+          "link": 55,
+          "shape": 7
+        },
+        {
           "name": "source_images",
           "type": "IMAGE",
           "link": null,
@@ -877,7 +902,7 @@
           "name": "positive",
           "type": "CONDITIONING",
           "links": [
-            33
+            56
           ]
         },
         {
@@ -890,21 +915,25 @@
         {
           "name": "h3_latent",
           "type": "LATENT",
-          "links": []
+          "links": [
+            57
+          ]
         }
       ],
       "properties": {
-        "Node name for S&R": "THSUniversalH3RepairConditioning"
+        "Node name for S&R": "THSUniversalH3ReferenceConditioning"
       },
       "widgets_values": [
         "REPLACE_WITH_REPAIR_PROMPT",
         "REPLACE_WITH_NEGATIVE_PROMPT",
+        "Use the appearance of <Picture 1> for the masked replacement in the source shot. Follow the original motion and match the source lighting and perspective. Keep the replacement consistent across frames.",
         768,
         768,
         22,
-        false
+        "without_reference",
+        "match"
       ],
-      "title": "10 · H3 repair conditioning (reference-free default)"
+      "title": "10 · H3 conditioning · три режима"
     },
     {
       "id": 80,
@@ -1263,7 +1292,7 @@
       "type": "THSUniversalPromptText",
       "pos": [
         1560,
-        600
+        806
       ],
       "size": [
         620,
@@ -1341,6 +1370,156 @@
         24.0
       ],
       "title": "Сравнение · wipe исходник / результат"
+    },
+    {
+      "id": 23,
+      "type": "THSUniversalReferenceImage",
+      "pos": [
+        1560,
+        40
+      ],
+      "size": [
+        620,
+        150
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "mode",
+          "type": "COMBO",
+          "link": null
+        },
+        {
+          "name": "reference_image",
+          "type": "COMBO",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "reference_image",
+          "type": "IMAGE",
+          "links": [
+            55,
+            62
+          ]
+        },
+        {
+          "name": "mode",
+          "type": "COMBO",
+          "links": [
+            53,
+            54,
+            61
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "THSUniversalReferenceImage"
+      },
+      "widgets_values": [
+        "without_reference",
+        "__none__"
+      ],
+      "title": "03a · Режим H3 и загрузка картинки"
+    },
+    {
+      "id": 24,
+      "type": "THSUniversalCorrectedFrameGuide",
+      "pos": [
+        2240,
+        40
+      ],
+      "size": [
+        480,
+        250
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 56
+        },
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "link": 57
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 58
+        },
+        {
+          "name": "source_images",
+          "type": "IMAGE",
+          "link": 59
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 60
+        },
+        {
+          "name": "mode",
+          "type": "COMBO",
+          "link": 61,
+          "widget": {
+            "name": "mode"
+          },
+          "shape": 7
+        },
+        {
+          "name": "frame_number",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "frame_number"
+          }
+        },
+        {
+          "name": "corrected_image",
+          "type": "IMAGE",
+          "link": 62,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "links": [
+            33
+          ]
+        },
+        {
+          "name": "guide_preview",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "status",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "THSUniversalCorrectedFrameGuide"
+      },
+      "widgets_values": [
+        "without_reference",
+        1
+      ],
+      "title": "03c · Исправленный кадр · номер в видео"
     }
   ],
   "links": [
@@ -1554,7 +1733,7 @@
     ],
     [
       33,
-      61,
+      24,
       0,
       80,
       1,
@@ -1711,6 +1890,86 @@
       104,
       2,
       "FLOAT"
+    ],
+    [
+      53,
+      23,
+      1,
+      22,
+      2,
+      "COMBO"
+    ],
+    [
+      54,
+      23,
+      1,
+      61,
+      6,
+      "COMBO"
+    ],
+    [
+      55,
+      23,
+      0,
+      61,
+      7,
+      "IMAGE"
+    ],
+    [
+      56,
+      61,
+      0,
+      24,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      57,
+      61,
+      2,
+      24,
+      1,
+      "LATENT"
+    ],
+    [
+      58,
+      40,
+      0,
+      24,
+      2,
+      "VAE"
+    ],
+    [
+      59,
+      11,
+      0,
+      24,
+      3,
+      "IMAGE"
+    ],
+    [
+      60,
+      20,
+      0,
+      24,
+      4,
+      "MASK"
+    ],
+    [
+      61,
+      23,
+      1,
+      24,
+      5,
+      "COMBO"
+    ],
+    [
+      62,
+      23,
+      0,
+      24,
+      7,
+      "IMAGE"
     ]
   ],
   "groups": [
@@ -1742,12 +2001,12 @@
     },
     {
       "id": 4702,
-      "title": "03 · PROMPT / ПРОМПТ",
+      "title": "03 · РЕЖИМ H3 И ПРАВКА",
       "bounding": [
         1512,
         -8,
-        716,
-        686
+        1256,
+        946
       ],
       "color": "#5b6168",
       "font_size": 20,
@@ -1831,7 +2090,7 @@
         "groups": [
           "01 · SOURCE / ИСХОДНИК",
           "02 · MASK / МАСКА",
-          "03 · PROMPT / ПРОМПТ",
+          "03 · РЕЖИМ H3 И ПРАВКА",
           "04 · GENERATE / ГЕНЕРАЦИЯ",
           "05 · COMPARE / СРАВНЕНИЕ",
           "06 · EXPORT / ЭКСПОРТ"
@@ -1851,7 +2110,9 @@
           "remainder": 5,
           "silence_sample_rate": 48000
         },
-        "compare": "lazy UI descriptors; synchronized frame and wipe navigation"
+        "compare": "lazy UI descriptors; synchronized frame and wipe navigation",
+        "repair_mode_node_id": 23,
+        "corrected_frame_node_id": 24
       }
     }
   },

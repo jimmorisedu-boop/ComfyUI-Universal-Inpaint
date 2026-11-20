@@ -89,16 +89,31 @@ def test_wrapper_edge_anchor_is_explicit_and_uses_first_last_frames(monkeypatch)
     np.testing.assert_array_equal(calls[0]["last_frame"], source[-1:])
 
 
-def test_wrapper_rejects_non_multiple32_canvas_before_h3_call(monkeypatch):
+def test_wrapper_aligns_1080_canvas_before_h3_call(monkeypatch):
     calls = []
     install_fake_h3(monkeypatch, calls)
-    with pytest.raises(ValueError, match="multiple of 32"):
+    THSUniversalH3RepairConditioning().run(
+        clip=FakeClip(),
+        vae=object(),
+        prompt="repair",
+        negative_prompt="",
+        width=1080,
+        height=1920,
+        length=119,
+    )
+    assert (calls[0]["width"], calls[0]["height"], calls[0]["length"]) == (1088, 1920, 119)
+
+
+def test_wrapper_rejects_empty_canvas_before_h3_call(monkeypatch):
+    calls = []
+    install_fake_h3(monkeypatch, calls)
+    with pytest.raises(ValueError, match="must be positive"):
         THSUniversalH3RepairConditioning().run(
             clip=FakeClip(),
             vae=object(),
             prompt="repair",
             negative_prompt="",
-            width=31,
+            width=0,
             height=32,
             length=5,
         )

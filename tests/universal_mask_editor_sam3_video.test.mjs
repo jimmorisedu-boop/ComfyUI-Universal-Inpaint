@@ -53,7 +53,13 @@ const app = {
     async cancelPrompt() {},
 };
 let interruptCalls = 0;
-const api = { queuePrompt(_number, prompt) { submitted.push(prompt); return Promise.resolve({ prompt_id: `sam3-${++promptCounter}` }); }, async interrupt() { interruptCalls += 1; }, addEventListener() {}, removeEventListener() {} };
+const apiEvents = new Map();
+const api = {
+    queuePrompt(_number, prompt) { submitted.push(prompt); return Promise.resolve({ prompt_id: `sam3-${++promptCounter}` }); },
+    async interrupt() { interruptCalls += 1; },
+    addEventListener(type, listener) { apiEvents.set(type, listener); },
+    removeEventListener(type) { apiEvents.delete(type); },
+};
 const node = { id: 7, widgets, graph: { setDirtyCanvas() {} }, addDOMWidget(_name, _type, root) { this.root = root; } };
 const editor = createUniversalMaskEditor(node, { app, api });
 editor.state.source = source; editor.state.frameCount = source.frames; editor.document.source = source;
@@ -99,6 +105,38 @@ const approvedFrameSignature = editor.state.sam3.frameSignature;
 button(editor.root, "Отследить видео").click();
 await new Promise((resolve) => setImmediate(resolve));
 const cancelledTrackPromptId = editor.state.pendingPreview.promptId;
+const progress = find(editor.root, item => item.tagName === "PROGRESS");
+const overlay = find(editor.root, item => item.className === "ths-mask-progress");
+const caption = find(editor.root, item => item.className === "ths-mask-progress-caption");
+const time = find(editor.root, item => item.className === "ths-mask-progress-time");
+assert.equal(overlay.style.display, "grid");
+assert.match(caption.textContent, /Очереди|очереди/);
+apiEvents.get("execution_start")({ detail: { prompt_id: cancelledTrackPromptId } });
+assert.match(caption.textContent, /Подготовка/);
+const report = (value, promptId = cancelledTrackPromptId, nodeId = "7") => {
+    apiEvents.get("universal_inpaint_mask_progress")({ detail: {
+        node: nodeId, prompt_id: promptId, phase: "sam3_track", value, max: 56,
+    } });
+};
+report(1, "another-job");
+report(1, cancelledTrackPromptId, "99");
+assert.equal(progress.value, "");
+const realNow = Date.now;
+try {
+    let now = realNow();
+    Date.now = () => now;
+    report(1);
+    assert.equal(progress.max, 56);
+    assert.equal(progress.value, 1);
+    now += 2500;
+    report(6);
+    assert.match(caption.textContent, /6 из 56 кадров/);
+    assert.match(time.textContent, /Осталось ≈ 0:25/);
+    report(3);
+    assert.equal(progress.value, 6, "late frame samples cannot move progress backwards");
+} finally {
+    Date.now = realNow;
+}
 const submittedBeforeCancellation = submitted.length;
 assert.equal(editor.handleRuntimeEvent({ prompt_id: cancelledTrackPromptId, exception_message: "user cancelled track" }, "execution_interrupted"), true);
 assert.equal(submitted.length, submittedBeforeCancellation, "cancellation does not auto-queue another request");
@@ -106,6 +144,7 @@ assert.equal(interruptCalls, 0, "targeted runtime cancellation does not invoke a
 assert.equal(editor.state.sam3.frameReady, true);
 assert.equal(editor.state.sam3.frameSignature, approvedFrameSignature);
 assert.equal(editor.state.sam3.trackReady, false);
+assert.equal(overlay.style.display, "none", "interruption clears the overlay");
 assert.equal(button(editor.root, "Отследить видео").disabled, false, "track stays enabled after targeted cancellation");
 assert.equal(button(editor.root, "Запустить H3").disabled, true, "H3 stays disabled until a full track succeeds");
 

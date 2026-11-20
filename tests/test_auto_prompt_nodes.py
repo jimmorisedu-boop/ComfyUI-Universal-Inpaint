@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from ths_universal_inpaint import auto_prompt_nodes as apn  # noqa: E402
-from ths_universal_inpaint.auto_prompt_core import DEFAULT_REPAIR_PROMPT  # noqa: E402
+from ths_universal_inpaint.auto_prompt_core import DEFAULT_REPAIR_PROMPT, compose_edit_instruction_prompt  # noqa: E402
 
 
 def _fixture():
@@ -42,8 +42,8 @@ def test_node_contract_has_mask_aware_auto_and_manual_modes():
     required = inputs["required"]
     assert required["images"][0] == "IMAGE"
     assert required["mask"][0] == "MASK"
-    assert required["mode"][0] == ["auto", "manual"]
-    assert required["mode"][1]["default"] == "auto"
+    assert required["mode"][0] == ["instruction", "auto", "manual"]
+    assert required["mode"][1]["default"] == "instruction"
     assert required["user_hint"][1]["default"] == ""
     assert required["manual_prompt"][1]["default"] == ""
     assert inputs["optional"]["max_frames"][1]["default"] == 3
@@ -51,6 +51,59 @@ def test_node_contract_has_mask_aware_auto_and_manual_modes():
     assert apn.THSUniversalAutoPrompt.RETURN_TYPES == ("STRING", "STRING", "IMAGE")
     assert apn.THSUniversalAutoPrompt.RETURN_NAMES == ("prompt", "caption", "preview")
     assert apn.THSUniversalAutoPrompt.OUTPUT_NODE is True
+
+
+def test_instruction_uses_translation_as_the_intended_edit_without_captioning(monkeypatch, tmp_path):
+    def forbidden(*args):
+        raise AssertionError("an explicit edit must not trigger Florence")
+
+    monkeypatch.setattr(apn, "_make_backend", forbidden)
+    monkeypatch.setattr(apn, "_local_translation_path", lambda: tmp_path)
+    monkeypatch.setattr(apn, "_translate_locally", lambda path, text: "Make the hair gray")
+    node = apn.THSUniversalAutoPrompt()
+    images = np.zeros((2, 4, 4, 3), dtype=np.float32)
+    mask = np.ones((2, 4, 4), dtype=np.float32)
+    task = "Сделай волосы седыми"
+    response = node.run(images, mask, mode="instruction", user_hint=task, manual_prompt="old text", preview_enabled=False)
+    prompt, caption, preview = response["result"]
+    assert prompt.startswith("Make the hair gray.")
+    assert "outside the mask" in prompt and "old text" not in prompt
+    assert caption == "" and tuple(preview.shape) == (1, 1, 1, 3)
+    assert response["ui"]["auto_prompt_instruction"] == [task]
+    monkeypatch.setattr(apn, "_local_translation_path", forbidden)
+    english = node.run(images, mask, mode="instruction", user_hint='Write "[2026]" on the sign', preview_enabled=False)
+    assert 'Write "[2026]" on the sign' in english["result"][0]
+    with pytest.raises(ValueError, match="Что изменить"):
+        node.run(images, mask, mode="instruction", user_hint="  ")
+
+
+@pytest.mark.parametrize("repair_mode", ["with_reference", "corrected_frame"])
+def test_image_repair_mode_runs_with_no_instruction_or_caption_model(repair_mode, monkeypatch):
+    def forbidden(*args):
+        pytest.fail("image-guided repair tried to generate an AutoPrompt")
+
+    monkeypatch.setattr(apn, "_instruction_prompt", forbidden)
+    monkeypatch.setattr(apn, "_make_backend", forbidden)
+    images, mask = _fixture()
+    for prompt_mode in ("instruction", "auto", "manual"):
+        prompt, caption, preview = apn.THSUniversalAutoPrompt().run(
+            images, mask, mode=prompt_mode, user_hint="", repair_mode=repair_mode,
+        )
+        assert prompt == caption == ""
+        assert tuple(preview.shape) == (1, 1, 1, 3)
+
+
+@pytest.mark.parametrize("edit, start, detail", [
+    ("Change tie to black bow tie", "Replace the necktie with a black bow tie at the shirt collar.", "moving with the wearer"),
+    ("Change the door to the wall.", "Replace the door with a continuous section of wall.", "adjacent wall's surface"),
+    ("Add a butterfly that flies past the tie.", "Add a butterfly that flies past the tie.", "Match the source lighting"),
+])
+def test_h3_edit_prompt_describes_visible_change_and_source_continuity(edit, start, detail):
+    prompt = compose_edit_instruction_prompt(edit)
+    assert prompt.startswith(start)
+    assert detail in prompt
+    assert "from frame to frame" in prompt and "outside the mask" in prompt
+    assert "<Video 1>" not in prompt
 
 
 def test_auto_mode_calls_injected_backend_and_caches_only_strings(monkeypatch):

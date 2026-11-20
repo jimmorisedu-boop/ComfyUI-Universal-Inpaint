@@ -25,6 +25,7 @@ from typing import Any, Iterable, Mapping
 
 import numpy as np
 
+from .mask_progress import frame_progress
 from .mask_sam3 import (
     SAM3UnavailableError,
     _native_config,
@@ -57,6 +58,7 @@ class SAM3Seed:
     box: tuple[float, float, float, float]
     mask: np.ndarray
     object_id: int = 1
+    objects: tuple[tuple[str, np.ndarray], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -190,6 +192,8 @@ def _prompt_digest(prompts: Iterable[Mapping[str, Any]], frame: int) -> str:
                 "frame": int(item.get("frame", frame)),
                 "box": [float(item[name]) for name in ("x", "y", "w", "h")],
             })
+        if "object_id" in item:
+            payload[-1]["object_id"] = int(item["object_id"])
     encoded = repr((int(frame), payload)).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:32]
 
@@ -214,6 +218,8 @@ def _prompt_events(parsed: Mapping[str, Any], frame: int) -> list[dict[str, Any]
     """Extract SAM3 box prompts while leaving brush/erase events as overlays."""
 
     sam3 = parsed.get("sam3") if isinstance(parsed.get("sam3"), Mapping) else {}
+    if sam3.get("objects"):
+        return [{**item, "object_id": index + 1} for index, item in enumerate(sam3["objects"])]
     prompt = sam3.get("prompt") if isinstance(sam3, Mapping) else None
     events: list[dict[str, Any]] = []
     explicit_frames: set[int] = set()
@@ -341,29 +347,43 @@ def calculate_frame(
                         "seed_token": cached.token, "direction": "forward",
                         "computed_frames": [frame]}
                 return mask, cached, meta
-    _throw_interrupted()
+    selected_prompts = matching if parsed.get("sam3", {}).get("objects") else matching[:1]
+    expected = tuple(int(value) for value in images[frame].shape[:2])
+    with _CACHE_LOCK:
+        recent_masks = {
+            key: object_mask
+            for cached in _SEED_CACHE.values()
+            if cached.source_digest == source_digest and cached.frame == frame
+            for key, object_mask in cached.objects
+        }
     try:
+        selected_image = images[frame]
         if interactive:
-            selected_image = np.nan_to_num(images[frame].astype(np.float32, copy=False), nan=0.0, posinf=1.0, neginf=0.0)
-            predicted = _predict_native(selected_image, event, keep_loaded=True)
-        else:
-            predicted = _predict_native(images[frame], event)
-        mask = np.asarray(predicted, dtype=bool)
+            selected_image = np.nan_to_num(selected_image.astype(np.float32, copy=False), nan=0.0, posinf=1.0, neginf=0.0)
+        object_masks = []
+        mask = np.zeros(expected, dtype=bool)
+        for index, item in enumerate(selected_prompts, start=1):
+            _throw_interrupted()
+            key = _prompt_digest(({k: v for k, v in item.items() if k != "object_id"},), frame)
+            object_mask = recent_masks.get(key)
+            if object_mask is None:
+                options = {"keep_loaded": True} if interactive else {}
+                object_mask = np.asarray(_predict_native(selected_image, item, **options), dtype=bool)
+                if object_mask.shape != expected or not bool(object_mask.any()):
+                    raise SAM3VideoError(f"SAM3 object {index} returned an empty or invalid seed mask")
+                object_mask = object_mask.copy()
+                recent_masks[key] = object_mask
+            object_masks.append((key, object_mask))
+            np.logical_or(mask, object_mask, out=mask)
+        _throw_interrupted()
     except SAM3UnavailableError as exc:
         meta = {"frame_ready": False, "track_ready": False, "frame": frame,
                 "seed_token": "", "direction": "forward", "computed_frames": [],
                 "error": str(exc)}
         raise SAM3VideoError(str(exc), meta=meta) from exc
-    expected = tuple(int(value) for value in images[frame].shape[:2])
-    _throw_interrupted()
-    if mask.shape != expected or not bool(mask.any()):
-        meta = {"frame_ready": False, "track_ready": False, "frame": frame,
-                "seed_token": "", "direction": "forward", "computed_frames": [],
-                "error": "SAM3 frame calculation returned an empty or invalid seed mask"}
-        raise SAM3VideoError(meta["error"], meta=meta)
     token = _seed_token(source_digest, frame, prompt_digest)
     seed = SAM3Seed(token, source_digest, tuple(int(v) for v in images.shape), frame,
-                    prompt_digest, box, np.asarray(mask, dtype=bool).copy(), 1)
+                    prompt_digest, box, mask, objects=tuple(object_masks))
     with _CACHE_LOCK:
         _SEED_CACHE[token] = seed
         _SEED_CACHE.move_to_end(token)
@@ -478,7 +498,7 @@ def _native_track(
     end: int,
     direction: str,
 ) -> dict[int, np.ndarray]:
-    """Run native stateful propagation and return only the selected object."""
+    """Propagate selected objects independently and union them per frame."""
 
     global _LAST_NATIVE_SEED_STRATEGY
     _LAST_NATIVE_SEED_STRATEGY = "unknown"
@@ -499,16 +519,18 @@ def _native_track(
         )
         # Box prompts use normalized xyxy corners.  The native reconstructor
         # converts these to the special [2, 3] corner labels expected by the
-        # stateful tracker; all prompts use object id 1 to preserve identity.
+        # stateful tracker. Legacy corrections share ID 1; explicit objects
+        # have individual IDs and masks so their motion remains independent.
         for item in prompts:
             item_frame = int(item.get("frame", seed.frame))
             if not 0 <= item_frame < video_state.num_frames:
                 continue
+            object_id = int(item.get("object_id", seed.object_id))
             if isinstance(item.get("points"), (list, tuple)):
                 video_state = video_state.with_prompt(
                     video_prompt_cls.create_point(
                         item_frame,
-                        seed.object_id,
+                        object_id,
                         item.get("points", []),
                         item.get("labels", [1] * len(item.get("points", []))),
                     )
@@ -516,7 +538,7 @@ def _native_track(
             else:
                 x, y, w, h = _normal_box(item)
                 video_state = video_state.with_prompt(
-                    video_prompt_cls.create_box(item_frame, seed.object_id, [x, y, x + w, y + h], is_positive=True)
+                    video_prompt_cls.create_box(item_frame, object_id, [x, y, x + w, y + h], is_positive=True)
                 )
         if not video_state.prompts:
             raise SAM3VideoError("SAM3 native video state has no object prompt")
@@ -555,25 +577,35 @@ def _native_track(
                     "SAM3 native tracker lacks add_new_mask(state, frame_idx, obj_id); "
                     "refusing a box-only seed that could change object identity"
                 )
-            tracker_states = state_lookup(inference_state, [int(seed.object_id)])
-            if not tracker_states:
-                raise SAM3VideoError("SAM3 native tracker did not create the selected seed object")
-            tracker_state = tracker_states[0]
-            add_new_mask(
-                inference_state=tracker_state,
-                frame_idx=int(seed.frame),
-                obj_id=int(seed.object_id),
-                mask=torch.from_numpy(np.asarray(seed.mask, dtype=np.float32)),
-            )
+            seeds = [(index, mask) for index, (_, mask) in enumerate(seed.objects, start=1)] or [(seed.object_id, seed.mask)]
+            updated_states = {}
+            for object_id, object_mask in seeds:
+                tracker_states = state_lookup(inference_state, [object_id])
+                if not tracker_states:
+                    raise SAM3VideoError(f"SAM3 native tracker did not create selected object {object_id}")
+                tracker_state = tracker_states[0]
+                add_new_mask(
+                    inference_state=tracker_state,
+                    frame_idx=int(seed.frame),
+                    obj_id=object_id,
+                    mask=torch.from_numpy(np.asarray(object_mask, dtype=np.float32)),
+                )
+                updated_states[id(tracker_state)] = tracker_state
             preflight = getattr(tracker, "propagate_in_video_preflight", None)
             if callable(preflight):
-                preflight(tracker_state, run_mem_encoder=True)
+                for tracker_state in updated_states.values():
+                    preflight(tracker_state, run_mem_encoder=True)
             _LAST_NATIVE_SEED_STRATEGY = "native_tracker_add_new_mask"
             spans: list[tuple[str, int]] = []
             if direction in {"forward", "both"}:
                 spans.append(("forward", max(0, int(end) - seed.frame)))
             if direction in {"backward", "both"}:
                 spans.append(("backward", max(0, seed.frame - int(start))))
+            progress_start = int(seed.frame) if direction == "forward" else int(start)
+            progress_end = int(seed.frame) if direction == "backward" else int(end)
+            report = frame_progress("sam3_track", progress_end - progress_start + 1)
+            completed = {int(seed.frame)}
+            report(len(completed))
             for request_direction, span in spans:
                 _throw_interrupted()
                 request = {
@@ -591,9 +623,20 @@ def _native_track(
                     outputs = response.get("outputs", response)
                     if not isinstance(outputs, Mapping):
                         continue
-                    selected = _select_object_mask(outputs, seed.object_id, tuple(int(v) for v in images.shape[1:3]))
-                    if selected is not None:
-                        masks[int(frame_idx)] = selected
+                    if len(seeds) > 1 and outputs.get("obj_ids", outputs.get("out_obj_ids")) is None:
+                        raise SAM3VideoError("SAM3 multi-object propagation did not report object IDs")
+                    shape = tuple(int(v) for v in images.shape[1:3])
+                    combined = None
+                    for object_id, _ in seeds:
+                        selected = _select_object_mask(outputs, object_id, shape)
+                        if selected is not None:
+                            combined = selected if combined is None else combined | selected
+                    if combined is not None:
+                        index = int(frame_idx)
+                        masks[index] = combined
+                        if progress_start <= index <= progress_end and index not in completed:
+                            completed.add(index)
+                            report(len(completed))
         finally:
             try:
                 close_session = getattr(model, "close_session", None)

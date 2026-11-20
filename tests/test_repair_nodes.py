@@ -12,6 +12,8 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 
 from ths_universal_inpaint.repair_nodes import (  # noqa: E402
     THSUniversalH3PadSource,
+    THSUniversalMaskedComposite,
+    THSUniversalTrimFrames,
     _next_h3_frame_count,
     composite_exact,
     pad_source_inputs,
@@ -82,8 +84,34 @@ def test_pad_node_prefills_model_source_but_preserves_pad_helper_contract():
 
     assert (original_count, padded_count) == (5, 5)
     outside = ~mask[0].astype(bool)
-    np.testing.assert_array_equal(padded[0][outside], images[0][outside])
-    assert np.any(np.abs(padded[0][mask[0].astype(bool)] - images[0][mask[0].astype(bool)]) > 1e-3)
+    np.testing.assert_array_equal(padded[0, :16, :16][outside], images[0][outside])
+    assert np.any(np.abs(padded[0, :16, :16][mask[0].astype(bool)] - images[0][mask[0].astype(bool)]) > 1e-3)
+
+
+@pytest.mark.parametrize("backend", ["numpy", "torch"])
+def test_h3_padding_and_output_crop_keep_source_coordinates(backend, monkeypatch):
+    # Isolate geometry from the existing Telea prefill and exercise both axes.
+    monkeypatch.setattr("ths_universal_inpaint.repair_nodes.telea_prefill_masked", lambda images, mask: images)
+    images_np = np.arange(2 * 37 * 33 * 3, dtype=np.float32).reshape(2, 37, 33, 3) / 10_000
+    mask_np = np.zeros(images_np.shape[:3], dtype=np.float32)
+    mask_np[:, -2:, -2:] = 1
+    as_tensor = pytest.importorskip("torch").from_numpy if backend == "torch" else np.asarray
+    images, mask = as_tensor(images_np), as_tensor(mask_np)
+
+    padded_images, padded_mask, _, count, padded_count = THSUniversalH3PadSource().run(images, mask)
+
+    assert (count, padded_count) == (2, 5)
+    assert tuple(padded_images.shape) == (5, 64, 64, 3)
+    assert tuple(padded_mask.shape) == (5, 64, 64)
+    np.testing.assert_array_equal(padded_images[:count, :37, :33], images_np)
+    np.testing.assert_array_equal(padded_images[:count, -1, -1], images_np[:, -1, -1])
+    np.testing.assert_array_equal(padded_mask[:count, :37, :33], mask_np)
+    assert float(padded_mask[:, 37:].sum() + padded_mask[:, :, 33:].sum()) == 0
+
+    decoded = as_tensor(np.full(padded_images.shape, 0.75, dtype=np.float32))
+    trimmed, = THSUniversalTrimFrames().run(decoded, count)
+    output, = THSUniversalMaskedComposite().run(images, trimmed, mask)
+    np.testing.assert_array_equal(output, np.where(mask_np[..., None] > 0, 0.75, images_np))
 
 
 def test_pad_without_audio_creates_silent_audio_contract():
@@ -93,6 +121,19 @@ def test_pad_without_audio_creates_silent_audio_contract():
     assert original_count == padded_count == 5
     assert audio["waveform"].shape == (1, 2, 10_000)
     assert float(audio["waveform"].sum()) == 0.0
+
+
+def test_pad_node_can_keep_original_pixels_as_the_h3_source(monkeypatch):
+    def forbidden(*args):
+        pytest.fail("replacement mode should keep the original pixel values")
+
+    monkeypatch.setattr("ths_universal_inpaint.repair_nodes.telea_prefill_masked", forbidden)
+    images = np.random.default_rng(42).random((6, 35, 33, 3), dtype=np.float32)
+    mask = np.ones(images.shape[:3], dtype=np.float32)
+    padded, padded_mask, _, original_count, padded_count = THSUniversalH3PadSource().run(images, mask, prefill=False)
+    assert (original_count, padded_count) == (6, 22)
+    np.testing.assert_array_equal(padded[:original_count, :35, :33], images)
+    assert np.count_nonzero(padded_mask[:, 35:]) == 0
 
 
 def test_composite_exactly_preserves_zero_mask_pixels():

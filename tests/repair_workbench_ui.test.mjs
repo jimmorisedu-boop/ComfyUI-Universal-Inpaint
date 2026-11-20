@@ -15,6 +15,7 @@ class FakeElement {
     append(...children) { this.children.push(...children.filter(Boolean)); }
     appendChild(child) { this.append(child); return child; }
     setAttribute(name, value) { this.attributes[name] = String(value); }
+    removeAttribute(name) { delete this.attributes[name]; delete this[name]; }
     addEventListener(type, handler) { const list = this.listeners.get(type) || []; list.push(handler); this.listeners.set(type, list); }
     dispatchEvent(event) { event.target ||= this; event.currentTarget = this; for (const handler of this.listeners.get(event.type) || []) handler(event); return !event.defaultPrevented; }
     focus() {}
@@ -24,7 +25,7 @@ globalThis.document = { createElement(tagName) { return new FakeElement(tagName)
 globalThis.window = { addEventListener() {}, removeEventListener() {} };
 
 const { createAutoPromptPreview, createPromptFreezeController, MUTE_MODE } = await import("../web/auto_prompt_preview.js");
-const { normalizeDescriptors } = await import("../web/repair_compare.js");
+const { createRepairCompare, normalizeDescriptors } = await import("../web/repair_compare.js");
 
 function makeGraph({ frozen = false, promptText = "literal prompt" } = {}) {
     const graph = { _nodes: [], links: [], setDirtyCanvas() {}, change() {} };
@@ -122,6 +123,129 @@ function makeGraph({ frozen = false, promptText = "literal prompt" } = {}) {
     assert.equal(preview.state.generated, "generated two");
 }
 
+// Typing a new task in a saved manual workflow restores the live conditioner
+// link and makes its text available to queued H3 runs without freezing.
+{
+    const { graph, auto, promptNode } = makeGraph({ frozen: true });
+    auto.widgets = [{name: "mode", value:"manual"}, {name:"user_hint", value:""}, {name:"manual_prompt", value:"previous prompt"}];
+    const preview = createAutoPromptPreview(auto, { app: { graph } });
+    preview.task.value = "Сделай волосы седыми";
+    preview.task.dispatchEvent({ type:"input" });
+    assert.equal(auto.widgets[0].value, "instruction");
+    assert.equal(auto.widgets[1].value, preview.task.value);
+    assert.equal(auto.widgets[2].value, "previous prompt");
+    assert.equal(graph.links.find(link => link[3] === 61)[1], 22);
+    assert.equal(promptNode.mode, MUTE_MODE);
+    assert.equal(preview.freeze.style.display, "none");
+    assert.equal(preview.prompt.readOnly, true);
+    assert.equal(preview.applyExecuted({auto_prompt_text:["old result"], auto_prompt_instruction:["другая задача"]}).stale, true);
+    assert.equal(preview.prompt.value, "");
+    assert.equal(preview.applyExecuted({auto_prompt_text:["Make the hair gray"], auto_prompt_instruction:[preview.task.value]}).applied, true);
+    assert.equal(preview.prompt.value, "Make the hair gray");
+}
+
+// A text-only preview bypasses an unfinished video mask while the regular
+// H3 prompt graph still uses the original connections.
+{
+    const { graph, auto } = makeGraph();
+    const request = "измени дверь на стену ";
+    auto.widgets = [{name:"mode", value:"instruction"}, {name:"user_hint", value:request}];
+    const output = {
+        "1": { class_type:"LoadVideo", inputs:{} },
+        "20": { class_type:"THSUniversalMaskEditor", inputs:{images:["1",0]} },
+        "22": { class_type:"THSUniversalAutoPrompt", inputs:{images:["1",0], mask:["20",0], mode:"instruction", user_hint:request, repair_mode:["23",1]} },
+        "23": { class_type:"THSUniversalReferenceImage", inputs:{mode:"with_reference", reference_image:"test.png"} },
+        "61": { class_type:"THSUniversalH3RepairConditioning", inputs:{prompt:["22",0]} },
+    };
+    const before = JSON.stringify(output);
+    let submitted;
+    let history = { status:{status_str:"success"}, outputs:{22:{auto_prompt_instruction:[request], auto_prompt_text:["Replace the door with a wall."]}} };
+    const api = {
+        async queuePrompt(_number, compiled) { submitted = compiled; return {prompt_id:"test-preview"}; },
+        async fetchApi(path) {
+            assert.equal(path,"/history/test-preview");
+            return {ok:true, async json() { return {"test-preview":history}; }};
+        },
+    };
+    const preview = createAutoPromptPreview(auto, {app:{graph, async graphToPrompt() { return {output}; }}, api});
+    await preview.generatePrompt();
+    assert.deepEqual(Object.values(submitted.output).map(node=>node.class_type).sort(), ["EmptyImage","SolidMask","THSUniversalAutoPrompt"]);
+    assert.equal(submitted.output[22].inputs.user_hint,request);
+    assert.equal(submitted.output[22].inputs.preview_enabled,false);
+    assert.equal(submitted.output[22].inputs.repair_mode,undefined);
+    assert.equal(JSON.stringify(output),before);
+    assert.equal(preview.prompt.value,"Replace the door with a wall.");
+    assert.equal(preview.generate.disabled,false);
+
+    auto.widgets[0].value = "auto";
+    output[22].inputs.mode = "auto";
+    history = {status:{status_str:"success"}, outputs:{20:{universal_mask_meta:[{sam3:{track_ready:false}}]}}};
+    await preview.generatePrompt();
+    assert.equal(submitted.output[20].class_type,"THSUniversalMaskEditor");
+    assert.equal(submitted.output[23],undefined);
+    assert.match(preview.status.textContent,/Отследить видео/);
+    assert.equal(preview.generate.disabled,false);
+    history = {status:{status_str:"error", messages:[["execution_error", {exception_message:"Missing local model"}]]}};
+    await preview.generatePrompt();
+    assert.match(preview.status.textContent,/Missing local model/);
+    assert.equal(preview.generate.disabled,false);
+}
+
+// Launch from the prompt node uses the connected mask editor's readiness gate
+// and can start directly from the current instruction.
+{
+    const { graph, auto } = makeGraph();
+    auto.widgets = [{name:"mode", value:"instruction"}, {name:"user_hint", value:""}];
+    const preview = createAutoPromptPreview(auto, {app:{graph}});
+    assert.equal(preview.launch.style.display, "inline-flex");
+    await preview.launchH3();
+    assert.match(preview.status.textContent, /напишите, что изменить/);
+
+    preview.task.value = "измени галстук на бабочку";
+    preview.task.dispatchEvent({type:"input"});
+    await preview.launchH3();
+    assert.match(preview.status.textContent, /Подключите выход edit_mask/);
+
+    let queued = false;
+    let calls = 0;
+    const editor = {
+        status: {textContent:""},
+        async requestQueue() {
+            calls++;
+            this.status.textContent = queued ? "H3 поставлен в очередь." : "В редакторе маски нажмите «Отследить видео».";
+            return queued;
+        },
+    };
+    graph._nodes.push({id:20, __thsUniversalMaskEditor:editor});
+    graph.links.push([39, 20, 0, 22, 1, "MASK"]);
+    auto.inputs[1].link = 39;
+    await preview.launchH3();
+    assert.match(preview.status.textContent, /Отследить видео/);
+    assert.equal(calls, 1);
+
+    queued = true;
+    await Promise.all([preview.launchH3(), preview.launchH3()]);
+    assert.equal(calls, 2);
+    assert.match(preview.status.textContent, /H3 поставлен в очередь/);
+    assert.equal(preview.prompt.value, "");
+    assert.equal(preview.launch.disabled, false);
+    preview.task.value = "";
+    preview.task.dispatchEvent({type:"input"});
+    const repairMode = {name:"mode", value:"with_reference"};
+    graph._nodes.push({id:23, widgets:[repairMode]});
+    graph.links.push([40, 23, 1, 22, 2, "COMBO"]);
+    auto.inputs.push({name:"repair_mode", link:40});
+    await preview.launchH3();
+    assert.equal(calls, 3);
+    repairMode.value = "corrected_frame";
+    await preview.launchH3();
+    assert.equal(calls, 4);
+    repairMode.value = "without_reference";
+    await preview.launchH3();
+    assert.equal(calls, 4);
+    assert.match(preview.status.textContent, /напишите, что изменить/);
+}
+
 // Compare descriptors are bounded, zero-based and lazy-compatible: only
 // filename descriptors are retained, with duplicate frames removed.
 {
@@ -136,6 +260,46 @@ function makeGraph({ frozen = false, promptText = "literal prompt" } = {}) {
     assert.deepEqual(descriptors.map((item) => item.frame), [1, 4]);
     assert.equal(descriptors[0].source.filename, "one.png");
     assert.equal(descriptors[1].result.filename, "four-r.png");
+}
+
+// Fast scrubbing can finish downloads out of order. Keep both image layers on
+// the latest requested frame and allow the divider to reach either edge.
+{
+    const loading = new Map();
+    const oldImage = globalThis.Image;
+    globalThis.Image = class {
+        naturalWidth = 544;
+        naturalHeight = 576;
+        set src(url) { loading.set(url, () => this.onload()); }
+    };
+    try {
+        const compare = createRepairCompare({});
+        compare.stage.clientWidth = 800;
+        compare.stage.clientHeight = 400;
+        compare.applyExecuted({
+            universal_repair_compare_frames: [
+                {frame: 0, source: "original-0", result: "result-0"},
+                {frame: 1, source: "original-1", result: "result-1"},
+            ],
+        });
+        compare.setFrame(1);
+        loading.get("original-1")();
+        loading.get("result-1")();
+        await compare.state.rendering;
+        loading.get("original-0")();
+        loading.get("result-0")();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(compare.source.src, "original-1");
+        assert.equal(compare.result.src, "result-1");
+        compare.wipe.value = "0";
+        compare.wipe.dispatchEvent({ type: "input" });
+        assert.equal(compare.result.style.clipPath, "inset(0 0 0 0%)");
+        compare.wipe.value = "100";
+        compare.wipe.dispatchEvent({ type: "input" });
+        assert.equal(compare.result.style.clipPath, "inset(0 0 0 100%)");
+    } finally {
+        globalThis.Image = oldImage;
+    }
 }
 
 console.log("repair_workbench_ui: PASS");

@@ -102,6 +102,8 @@ def test_corrected_frame_uses_original_frame_index_and_exact_masked_merge(monkey
     assert result[1].shape == (1, 4, 5, 3)
     assert calls[0]["frame_idx"] == 2
     assert calls[0]["vae"] == "vae"
+    assert calls[0]["image"].shape == (1, 32, 32, 3)
+    np.testing.assert_array_equal(calls[0]["image"][:, :4, :5], result[1])
     merged = calls[0]["image"][0]
     np.testing.assert_array_equal(merged[0, 0], source[2, 0, 0])
     np.testing.assert_array_equal(merged[1, 2], np.full((3,), 0.625, dtype=np.float32))

@@ -7,6 +7,7 @@ contains no weights, user paths or tokens.
 
 | Profile | Hub revision | Destination | Access |
 | --- | --- | --- | --- |
+| `instruction` | `Helsinki-NLP/opus-mt-ru-en@fbd6dc73284f…` | `models/LLM/opus-mt-ru-en/` | public, CC-BY-4.0 |
 | `autoprompt` | `MiaoshouAI/Florence-2-base-PromptGen-v2.0@59b6e4bf…` | `models/LLM/Florence-2-base-PromptGen-v2.0/` | public, MIT model card |
 | `sam3` | `facebook/sam3@3c879f39826c…` | `models/sam3/sam3.safetensors` | gated; manual licence/access |
 | `h3` | `Comfy-Org/MiniMax-H3@4b53a351…` | `models/vae/`, `models/diffusion_models/`, `models/text_encoders/` | public Hub repo; review its `other` licence |

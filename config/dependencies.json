@@ -28,6 +28,15 @@
         "SAM3 model access is gated on Hugging Face; accept the terms yourself and use HF_TOKEN or an existing hf auth login."
       ]
     },
+    "instruction": {
+      "description": "Local Russian-to-English translation for the H3 edit instruction field.",
+      "requirements": ["requirements-instruction.txt"],
+      "custom_nodes": [],
+      "workflows": [],
+      "models": ["opus-mt-ru-en"],
+      "checks": ["torch", "transformers", "sentencepiece"],
+      "manual_notes": ["The verified PyTorch checkpoint requires an existing PyTorch 2.6 or newer."]
+    },
     "autoprompt": {
       "description": "Florence-2 PromptGen captioning for the optional AutoPrompt workflow.",
       "requirements": ["requirements-autoprompt.txt"],

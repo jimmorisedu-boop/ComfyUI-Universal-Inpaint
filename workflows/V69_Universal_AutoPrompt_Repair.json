@@ -251,13 +251,14 @@
         "Node name for S&R": "THSUniversalAutoPrompt"
       },
       "widgets_values": [
-        "auto",
+        "instruction",
         "",
         "",
         3,
-        0.6
+        0.6,
+        false
       ],
-      "title": "03b · Автопромпт по контексту маски (локально)"
+      "title": "03b · Что изменить в видео?"
     },
     {
       "id": 30,

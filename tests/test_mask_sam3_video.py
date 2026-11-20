@@ -90,6 +90,48 @@ def test_point_preview_preserves_prompt_and_tracks_only_on_explicit_action(monke
     assert result[2].sum() < selected.sum(), "manual eraser must survive point-based tracking"
 
 
+def test_object_previews_are_unioned_and_unchanged_objects_are_reused(monkeypatch):
+    images = _clip()
+    left = np.zeros(images.shape[1:3], dtype=bool)
+    right = left.copy()
+    left[3:14, 3:13] = True
+    right[3:14, 18:26] = True
+    calls = []
+
+    def predict(_image, event):
+        calls.append(event["labels"])
+        if event["points"][0][0] > .5:
+            return right
+        result = left.copy()
+        if 0 in event["labels"]:
+            result[:, :7] = False
+        return result
+
+    video.clear_sam3_video_cache()
+    monkeypatch.setattr(video, "_predict_native", predict)
+    a = {"frame": 1, "points": [[.25, .3]], "labels": [1]}
+    b = {"frame": 1, "points": [[.75, .3]], "labels": [1]}
+    doc = {"sam3": {"frame": 1, "prompt": a}}
+    first, _, _ = video.calculate_frame(images, core.parse_mask_data(doc, len(images)), frame=1)
+    np.testing.assert_array_equal(first, left)
+    doc["sam3"].pop("prompt")
+    doc["sam3"]["objects"] = [a, b]
+    group, seed, _ = video.calculate_frame(images, core.parse_mask_data(doc, len(images)), frame=1)
+    np.testing.assert_array_equal(group, left | right)
+    assert len(seed.objects) == 2 and calls == [[1], [1]]
+
+    negative = {**a, "points": a["points"] + [[.15, .3]], "labels": [1, 0]}
+    doc["sam3"]["objects"] = [negative, b]
+    parsed = core.parse_mask_data(doc, len(images))
+    refined, refined_seed, _ = video.calculate_frame(images, parsed, frame=1)
+    assert calls == [[1], [1], [1, 0]]
+    assert not refined[5, 4] and refined[5, 20]
+    with pytest.raises(video.SAM3VideoError, match="current object prompt"):
+        video._lookup_seed(images, parsed, 1, seed.token)
+    assert video._lookup_seed(images, parsed, 1, refined_seed.token) is refined_seed
+    assert [p["object_id"] for p in video._prompt_events(parsed, 1)] == [1, 2]
+
+
 def test_track_requires_fresh_seed_and_uses_native_only(monkeypatch):
     images = _clip()
     monkeypatch.setattr(video, "_predict_native", lambda image, event: np.pad(

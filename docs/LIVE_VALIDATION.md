@@ -1,5 +1,30 @@
 # Live ComfyUI verification
 
+## Russian edit instructions — 2026-11-19 (Europe/Moscow)
+
+The V70 workbench was loaded in the actual local ComfyUI frontend with a
+previously frozen manual prompt. Entering a Russian task restored the link
+from the AutoPrompt node to the H3 conditioner's prompt input. A partial job
+translated the task with local OPUS-MT and returned an English edit prompt
+in the browser with no JavaScript errors. The partial job used small native
+source/mask nodes and verified prompt generation and wiring without running
+video generation. The Python and frontend suites passed.
+
+## SAM3 groups and right-click removal — 2026-11-19 (Europe/Moscow)
+
+The local 119-frame video was tested with hair and shirt as separate SAM3
+objects. The second click added 10,197 preview pixels while retaining all
+3,493 hair pixels. A negative point changed 671 shirt mask pixels and left
+the hair mask identical. Native tracking returned masks across all 119
+frames. Both objects were visible in sampled frames 1, 30, 60, 90 and 119,
+and a manual brush mark stayed on frame 1.
+
+In build `20261119-r14b-sam3-context`, right-clicking the negative marker
+returned the exact two-object mask from before that marker was added.
+Right-clicking the shirt away from its marker returned the exact hair-only
+mask even with hair selected in the object list. Right-clicking the last
+remaining positive marker cleared the final object and disabled Track video.
+
 ## Faster SAM3 preview — 2026-11-19 (Europe/Moscow)
 
 Editor build `20261119-r13-sam3-preview` was tested in the actual local

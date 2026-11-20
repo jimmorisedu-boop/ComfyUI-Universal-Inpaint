@@ -15,7 +15,7 @@ The repository is designed to be cloned directly under a ComfyUI checkout's
 
 | Path | Purpose | H3 required? |
 | --- | --- | --- |
-| `workflows/V70_Universal_Repair_Workbench.json` | Main repair workbench with mask, prompt, H3 repair, comparison and export stages | Yes for generation |
+| `workflows/V70_Universal_Repair_Workbench.json` | Main workbench with instruction, image reference and corrected-frame modes sharing one mask and export path | Yes for generation |
 | `workflows/V69_Universal_Masked_Repair_MASK_ONLY.json` | Mask calculation/preview and image export | No |
 | `workflows/V69_Universal_Masked_Repair.json` | Manual mask → H3 repair baseline | Yes for generation |
 | `workflows/V69_Universal_AutoPrompt_Repair.json` | Optional local caption-assisted prompt branch | Yes for generation; caption model optional |

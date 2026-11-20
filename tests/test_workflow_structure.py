@@ -10,6 +10,7 @@ FULL = ROOT / "workflows" / "V69_Universal_Masked_Repair.json"
 MASK_ONLY = ROOT / "workflows" / "V69_Universal_Masked_Repair_MASK_ONLY.json"
 AUTO = ROOT / "workflows" / "V69_Universal_AutoPrompt_Repair.json"
 REFERENCE = ROOT / "workflows" / "V69_Universal_Reference_Repair.json"
+WORKBENCH = ROOT / "workflows" / "V70_Universal_Repair_Workbench.json"
 
 
 def load(path):
@@ -137,7 +138,7 @@ def test_auto_prompt_variant_wires_real_images_mask_and_prompt_widget():
     assert prompt_edges and prompt_edges[0][3:] == [conditioner["id"], 2, "STRING"]
     assert conditioner["inputs"][2]["widget"] == {"name": "prompt"}
     assert conditioner["inputs"][2]["link"] == prompt_edges[0][0]
-    assert auto["widgets_values"] == ["auto", "", "", 3, 0.6]
+    assert auto["widgets_values"] == ["instruction", "", "", 3, 0.6, False]
     assert workflow["extra"]["ths"]["auto_prompt"]["ui_keys"] == [
         "auto_prompt_text", "auto_prompt_caption", "auto_prompt_status"
     ]
@@ -214,6 +215,31 @@ def test_reference_variant_layout_is_readable_and_manual_graph_is_unchanged():
     manual = load(FULL)
     assert by_type(manual)["THSUniversalH3RepairConditioning"]["id"] == 61
     assert "THSUniversalH3ReferenceConditioning" not in by_type(manual)
+
+
+def test_workbench_runs_three_h3_modes_through_one_mask_and_one_sampler():
+    workflow = load(WORKBENCH)
+    nodes = {node["id"]: node for node in workflow["nodes"]}
+    links = {link[0]: link for link in workflow["links"]}
+
+    def origin(target, name):
+        link_id = next(item["link"] for item in nodes[target]["inputs"] if item["name"] == name)
+        return links[link_id][1:3]
+
+    assert nodes[23]["type"] == "THSUniversalReferenceImage"
+    assert nodes[23]["widgets_values"] == ["without_reference", "__none__"]
+    assert nodes[22]["widgets_values"][0] == "instruction"
+    assert origin(22, "repair_mode") == origin(61, "mode") == origin(24, "mode") == [23, 1]
+    assert origin(61, "reference_image") == origin(24, "corrected_image") == [23, 0]
+    assert origin(61, "prompt") == [22, 0]
+    assert origin(24, "positive") == [61, 0]
+    assert origin(24, "latent") == [61, 2]
+    assert origin(24, "source_images") == origin(92, "source") == [11, 0]
+    assert origin(24, "mask") == origin(30, "mask") == origin(92, "repair_mask") == [20, 0]
+    assert origin(80, "positive") == [24, 0]
+    assert origin(80, "latent_image") == [56, 0]
+    assert origin(100, "audio") == [11, 1]
+    assert_groups_fit(workflow, {4702: [22, 23, 24, 103]})
 
 
 def test_workflow_layout_is_readable_and_editor_has_room():

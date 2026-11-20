@@ -15,9 +15,14 @@ class FakeElement {
     releasePointerCapture() {}
 }
 
+let hitBits = 0;
 class FakeCanvas extends FakeElement {
     constructor() { super("canvas"); this.width = 640; this.height = 360; }
-    getContext() { const noop = () => {}; return new Proxy({}, { get: () => noop, set: () => true }); }
+    getContext() {
+        const noop = () => {};
+        const getImageData = () => this.width === 1 && this.height === 1 ? {data: [hitBits, 0, 0, 255]} : undefined;
+        return new Proxy({ getImageData }, { get: (target, key) => target[key] || noop, set: () => true });
+    }
 }
 
 globalThis.document = {
@@ -67,9 +72,10 @@ function click(x, y, extra = {}) {
     editor.canvas.dispatchEvent({ type: "pointerdown", button: 0, pointerId: 1, clientX: x, clientY: y, preventDefault() {}, ...extra });
     editor.canvas.dispatchEvent({ type: "pointerup", button: 0, pointerId: 1, clientX: x, clientY: y, preventDefault() {}, ...extra });
 }
-async function ready(token, track = false) {
+async function ready(token, track = false, objectMap = null) {
     const id = editor.state.pendingPreview.promptId;
-    await editor.applyExecuted({ prompt_id: id, universal_mask_meta: [{ source, has_mask: true, sam3: { frame_ready: true, track_ready: track, frame: editor.document.sam3.frame, seed_token: token, direction: "both", computed_frames: track ? [0,1,2] : [editor.document.sam3.frame] } }] });
+    const patch = objectMap ? { universal_mask_frame_patch: [{ frame: editor.document.sam3.frame, object_map: objectMap }] } : {};
+    await editor.applyExecuted({ ...patch, prompt_id: id, universal_mask_meta: [{ source, has_mask: true, sam3: { frame_ready: true, track_ready: track, frame: editor.document.sam3.frame, seed_token: token, direction: "both", computed_frames: track ? [0,1,2] : [editor.document.sam3.frame] } }] });
     sourceFrame(editor.state.frame);
 }
 assert.equal(editor.state.mode, "sam_point");
@@ -131,7 +137,12 @@ assert.equal(JSON.stringify(editor.document.frames[2]),stroke);
 assert.deepEqual(editor.document.sam3.prompt,pointDocument.sam3.prompt,"copying brush edits retains the point seed on its original frame");
 assert.equal(editor.state.sam3.frameReady,true);
 sourceFrame(0);button(editor.root,"Выбрать объект").click();click(400,180);await tick();
-assert.deepEqual(editor.document.sam3.prompt.points,[[.625,.5]],"normal click replaces previous object");
+assert.equal(editor.document.sam3.prompt,undefined);
+const group = editor.document.sam3.objects;
+assert.equal(group.length,2,"normal click adds a second object");
+assert.deepEqual(group[0],pointDocument.sam3.prompt);
+assert.deepEqual(group[1].points,[[.625,.5]]);
+assert.equal(control(editor.root,"Активный объект SAM3").value,"1");
 assert.equal(JSON.stringify(editor.document.frames[1]),stroke,"reselection retains manual corrections");
 assert.equal(button(editor.root,"Запустить H3").disabled,true);
 const pendingId=editor.state.pendingPreview.promptId;
@@ -142,11 +153,46 @@ const stale=await editor.applyExecuted({
 assert.equal(stale.stale,true);assert.equal(editor.state.pendingPreview.promptId,pendingId);
 assert.equal(editor.state.mismatchBlocked,false);
 await ready("point-seed-4");
+const objectSelect = control(editor.root,"Активный объект SAM3");
+objectSelect.value="0"; objectSelect.dispatchEvent({type:"change"});
+button(editor.root,"Исключить из объекта").click();click(128,90);await tick();
+assert.deepEqual(editor.document.sam3.objects[0].labels,[1,1,0,0]);
+assert.deepEqual(editor.document.sam3.objects[1],group[1],"negative point refines only the active object");
+await ready("point-seed-5");
+const refinedGroup = JSON.parse(widgets[0].value).sam3.objects;
+assert.equal(button(editor.root,"Удалить объект"),null);
+function rightClick(x, y) {
+    let prevented = false;
+    editor.canvas.dispatchEvent({type:"contextmenu",button:2,clientX:x,clientY:y,preventDefault(){ prevented=true; }});
+    assert.equal(prevented,true);
+}
+rightClick(128,90);await tick();
+assert.equal(editor.document.sam3.objects.length,2);
+assert.deepEqual(editor.document.sam3.objects[0].labels,[1,1,0]);
+await ready("point-seed-marker-removed", false, "data:image/png;base64,objectMap");
+const afterMarker = JSON.parse(widgets[0].value).sam3.objects;
+globalThis.Image = class {
+    naturalWidth = 640;
+    naturalHeight = 360;
+    set src(_value) { queueMicrotask(() => this.onload?.()); }
+};
+objectSelect.value="1"; objectSelect.dispatchEvent({type:"change"});
+hitBits = 3; // Both masks cover the pixel. The active object is removed.
+rightClick(450,220);await tick();
+assert.deepEqual(editor.document.sam3.prompt,afterMarker[0]);
+assert.equal(editor.document.sam3.objects,undefined);
+await ready("point-seed-6");
+delete globalThis.Image;
+button(editor.root,"Отменить").click();
+assert.deepEqual(editor.document.sam3.objects,afterMarker);
+button(editor.root,"Отменить").click();
+assert.deepEqual(editor.document.sam3.objects,refinedGroup);
 button(editor.root,"Очистить кадр").click();
 assert.equal(editor.document.sam3.prompt,undefined);
+assert.equal(editor.document.sam3.objects,undefined);
 assert.equal(editor.state.sam3.frameReady,false);
 button(editor.root,"Отменить").click();
-assert.deepEqual(editor.document.sam3.prompt.points,[[.625,.5]]);
+assert.deepEqual(editor.document.sam3.objects,refinedGroup);
 assert.equal(editor.state.sam3.frameReady,false,"undo of a changed selection requires fresh proof");
 // Dragging, middle mouse and cancelled pointers never select an object.
 const count=submitted.length;
@@ -159,6 +205,6 @@ editor.canvas.dispatchEvent({type:"pointerdown",button:0,pointerId:3,clientX:160
 editor.canvas.dispatchEvent({type:"pointercancel",pointerId:3});await tick();assert.equal(submitted.length,count);
 editor.commit();const saved=widgets[0].value;editor.destroy();
 const restored=createUniversalMaskEditor(node,{app,api});
-assert.deepEqual(restored.document.sam3.prompt,JSON.parse(saved).sam3.prompt);
+assert.deepEqual(restored.document.sam3.objects,refinedGroup);
 assert.equal(restored.state.sam3.frameReady,false,"saved seed does not invent live readiness");
 restored.destroy();console.log("universal_mask_editor_sam3_points: PASS");

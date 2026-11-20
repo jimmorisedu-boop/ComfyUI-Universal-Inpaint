@@ -21,8 +21,9 @@ const MAX_POINTS_PER_STROKE = 4096;
 const MAX_TOTAL_POINTS = 65536;
 const MAX_PREVIEWS = 48;
 const MAX_HISTORY = 80;
-const EDITOR_BUILD = "20261119-r13-sam3-preview";
+const EDITOR_BUILD = "20261119-r14b-sam3-context";
 const SAM3_FRAME_PREVIEW = "sam3_frame_v1";
+const MAX_SAM3_OBJECTS = 8;
 
 // A bounded, local flight recorder. Callers pass only explicit diagnostic
 // fields: never the prompt, mask document, image URLs or image buffers.
@@ -370,6 +371,12 @@ function addStyles(root) {
       .ths-mask-editor .ths-mask-tools { display: flex; flex-direction: column; align-items: center; gap: 6px; padding-block: 4px; }
       .ths-mask-editor .ths-mask-tools > :nth-child(5) { margin-block-start: 12px; }
       .ths-mask-editor .ths-canvas-wrap { position: relative; min-width: 0; min-height: 220px; background: ${COLORS.panel}; border: 1px solid ${COLORS.borderSoft}; border-radius: 6px; overflow: hidden; }
+      .ths-mask-editor .ths-mask-progress { position: absolute; z-index: 3; inset: 0; display: none; place-items: center; padding: 16px; pointer-events: none; }
+      .ths-mask-editor .ths-mask-progress-card { box-sizing: border-box; display: grid; gap: 8px; width: min(100%, 300px); padding: 14px 16px; border: 1px solid ${COLORS.border}; border-radius: 8px; background: ${COLORS.panel}; box-shadow: 0 3px 16px #0008; }
+      .ths-mask-editor .ths-mask-progress-title { color: ${COLORS.text}; font-size: 13px; font-weight: 650; }
+      .ths-mask-editor .ths-mask-progress-track { width: 100%; height: 8px; accent-color: ${COLORS.accent}; }
+      .ths-mask-editor .ths-mask-progress-caption { color: ${COLORS.muted}; font-size: 12px; font-variant-numeric: tabular-nums; }
+      .ths-mask-editor .ths-mask-progress-time { color: ${COLORS.muted}; font-size: 12px; font-variant-numeric: tabular-nums; }
       .ths-mask-editor .ths-mask-inspector { min-width: 0; min-height: 0; overflow: hidden; background: ${COLORS.panel}; border: 1px solid ${COLORS.borderSoft}; border-radius: 7px; display: flex; flex-direction: column; }
       .ths-mask-editor .ths-mask-inspector-body { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
       .ths-mask-editor .ths-mask-export { flex: none; padding: 12px 16px; border-top: 1px solid ${COLORS.borderSoft}; }
@@ -488,7 +495,17 @@ export function createUniversalMaskEditor(node, options = {}) {
     empty.textContent = "Подготовьте превью, чтобы открыть кадры";
     const canvasBadge = createElement("div", { position: "absolute", left: "8px", top: "8px", padding: "3px 6px", borderRadius: "3px", background: COLORS.panel, color: COLORS.muted, font: "600 10px/1.2 Inter, Arial, sans-serif", pointerEvents: "none" });
     const brushCursor = createElement("div", { position: "absolute", display: "none", pointerEvents: "none", border: `1px solid ${COLORS.mask}`, borderRadius: "50%", transform: "translate(-50%, -50%)", boxSizing: "border-box", zIndex: "2" }, "ths-mask-brush-cursor");
-    canvasWrap.append(canvas, empty, canvasBadge, brushCursor);
+    const progressOverlay = createElement("div", {}, "ths-mask-progress");
+    const progressCard = createElement("div", {}, "ths-mask-progress-card");
+    const progressTitle = createElement("div", {}, "ths-mask-progress-title");
+    progressTitle.setAttribute("role", "status");
+    const progressTrack = createElement("progress", {}, "ths-mask-progress-track");
+    const progressCaption = createElement("div", {}, "ths-mask-progress-caption");
+    const progressTime = createElement("div", {}, "ths-mask-progress-time");
+    progressCard.append(progressTitle, progressTrack, progressCaption, progressTime);
+    progressOverlay.append(progressCard);
+    canvasWrap.append(canvas, empty, canvasBadge, brushCursor, progressOverlay);
+    let progressTimer = null;
     root.append(canvasWrap, canvasPlaceholder);
 
     const viewRow = createElement("div", { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "7px" });
@@ -510,7 +527,7 @@ export function createUniversalMaskEditor(node, options = {}) {
     const toolLabel = createElement("span", { color: COLORS.dim, font: "600 10px/1.2 Inter, Arial, sans-serif", textTransform: "uppercase", letterSpacing: ".07em", marginRight: "2px" }); toolLabel.textContent = "Рисование";
     const tools = {};
     for (const [key, label, hint] of [
-        ["sam_point", "Выбрать объект", "Клик по объекту → предпросмотр SAM3 только на этом кадре. Новый клик выбирает другой объект."],
+        ["sam_point", "Выбрать объект", "Клик по объекту добавляет его к общей маске на опорном кадре."],
         ["sam_add", "Добавить к объекту", "Клик по пропущенной части выбранного объекта → уточнить предпросмотр."],
         ["sam_remove", "Исключить из объекта", "Клик по лишней области → исключить её из выделения SAM3."],
     ]) { tools[key] = iconButton(label, key, hint); toolPanel.append(tools[key]); }
@@ -679,7 +696,12 @@ export function createUniversalMaskEditor(node, options = {}) {
     restyle(queueHint, "ths-mask-queue-hint");
     const selectionPanel = section("1. Выделение");
     const modeHint = createElement("p", {}, "ths-mask-section-copy");
-    selectionPanel.append(modeLabel, modeHint);
+    const objectSelect = document.createElement("select");
+    objectSelect.setAttribute("aria-label", "Активный объект SAM3");
+    const objectLabel = labelControl("Активный объект SAM3", objectSelect);
+    const objectControls = createElement("div", { display: "none", flexWrap: "wrap", alignItems: "center", gap: "6px" });
+    objectControls.append(objectLabel);
+    selectionPanel.append(modeLabel, modeHint, objectControls);
     const edgesPanel = section("2. Настройки маски");
     edgesPanel.append(maskSettingsGroup, brushLabel, refine, refineMethodLabel);
     const trackingPanel = section("3. Диапазон трекинга");
@@ -834,10 +856,17 @@ export function createUniversalMaskEditor(node, options = {}) {
         if (!source) return "";
         return [source.frames, source.width, source.height, source.fingerprint || ""].join("|");
     }
+    function sam3Objects() {
+        const sam3 = documentState.sam3;
+        return Array.isArray(sam3?.objects) ? sam3.objects : sam3?.prompt ? [sam3.prompt] : [];
+    }
+    function isSam3Box(event) {
+        return event?.type === "rect" && (event.refine_method === "sam3" || event.sam3_prompt);
+    }
     function sam3SeedEvents(frame = state.frame) {
-        const prompt = documentState.sam3?.prompt;
-        if (prompt && Number(prompt.frame) === Number(frame)) return [clone(prompt)];
-        return eventsAt(frame).filter((event) => event?.type === "rect" && (event.refine_method === "sam3" || event.refine === true));
+        const objects = sam3Objects();
+        if (objects.length) return objects.filter(item => Number(item.frame) === Number(frame));
+        return eventsAt(frame).filter(isSam3Box);
     }
     function hasSam3Seed(frame = state.frame) { return sam3SeedEvents(frame).length > 0; }
     function sam3SeedSignature(frame = state.frame) {
@@ -887,6 +916,56 @@ export function createUniversalMaskEditor(node, options = {}) {
         return Boolean(state.mismatchBlocked || state.refinementError || state.refinementBusy || state.pendingPreview);
     }
 
+    function requestLabel(pending) {
+        if (pending === state.pendingH3) return "Запуск H3";
+        if (pending.sam3Action === "frame") return "Расчёт кадра SAM3";
+        if (pending.sam3Action === "track") return "Трекинг SAM3";
+        if (pending.kind === "refinement") return "Уточнение маски";
+        return safeMode(node, documentState) === "optical_flow" ? "Расчёт Optical Flow" : "Подготовка кадров и маски";
+    }
+
+    function durationLabel(milliseconds) {
+        const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+        return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+    }
+
+    function showRequestProgress() {
+        const pending = state.pendingPreview || state.pendingH3;
+        progressOverlay.style.display = pending ? "grid" : "none";
+        if (!pending) {
+            if (progressTimer !== null) clearInterval(progressTimer);
+            progressTimer = null;
+            return;
+        }
+        if (progressTimer === null) {
+            progressTimer = setInterval(showRequestProgress, 1000);
+            progressTimer?.unref?.();
+        }
+        const now = Date.now();
+        const sample = pending.frameProgress;
+        const label = sample?.phase === "optical_flow_corrections" ? "Optical Flow · учёт правок" : requestLabel(pending);
+        if (progressTitle.textContent !== label) {
+            progressTitle.textContent = label;
+            progressTrack.setAttribute("aria-label", label);
+        }
+        if (sample) {
+            progressTrack.max = sample.total;
+            progressTrack.value = sample.value;
+            const percent = Math.floor(100 * sample.value / sample.total);
+            progressCaption.textContent = sample.value === sample.total
+                ? `${sample.value} из ${sample.total} кадров · подготовка результата…`
+                : `${sample.value} из ${sample.total} кадров · ${percent}%`;
+        } else {
+            progressTrack.removeAttribute?.("value");
+            progressCaption.textContent = pending.startedAt ? "Подготовка…" : pending.promptId ? "Ожидание в очереди…" : "Отправка в очередь…";
+        }
+        const elapsed = `Прошло ${durationLabel(now - (pending.startedAt || pending.submittedAt))}`;
+        const eta = sample?.finishAt;
+        progressTime.textContent = eta > now && now - sample.at < 15000
+            ? `Осталось ≈ ${durationLabel(eta - now + 999)}`
+            : elapsed;
+    }
+
     function updateMaskSettingTooltips() {
         const sam3 = sam3Mode();
         const hint = sam3
@@ -900,7 +979,22 @@ export function createUniversalMaskEditor(node, options = {}) {
 
     function updateActionAvailability() {
         const modeIsSam3 = sam3Mode();
-        modeHint.textContent = modeIsSam3 ? "Клик по объекту → предпросмотр. ＋ / − уточняют выбор. «Отследить видео» запускается отдельно." : safeMode(node, documentState) === "optical_flow" ? "Нарисуйте область. Optical Flow перенесёт её по движению." : safeMode(node, documentState) === "keyframes" ? "Маски ближайших ручных ключей, без расчёта движения." : "Одна неподвижная маска для всего диапазона.";
+        modeHint.textContent = modeIsSam3 ? "Прицел добавляет объекты. ＋ и − уточняют активный объект. Правый клик удаляет точку или объект." : safeMode(node, documentState) === "optical_flow" ? "Нарисуйте область. Optical Flow перенесёт её по движению." : safeMode(node, documentState) === "keyframes" ? "Маски ближайших ручных ключей, без расчёта движения." : "Одна неподвижная маска для всего диапазона.";
+        const objects = sam3Objects();
+        const activeObject = clamp(state.activeSam3Object || 0, 0, Math.max(0, objects.length - 1));
+        state.activeSam3Object = activeObject;
+        objectControls.style.display = modeIsSam3 && objects.length ? "flex" : "none";
+        if (state.sam3OptionCount !== objects.length) {
+            objectSelect.textContent = "";
+            for (let i = 0; i < objects.length; i += 1) {
+                const option = document.createElement("option");
+                option.value = String(i); option.textContent = `Объект ${i + 1}`;
+                objectSelect.append(option);
+            }
+            state.sam3OptionCount = objects.length;
+        }
+        objectSelect.value = String(activeObject);
+        objectSelect.disabled = Boolean(state.pendingPreview || state.pendingH3 || state.mismatchBlocked);
         for (const name of ["sam_point", "sam_add", "sam_remove"]) {
             tools[name].style.display = modeIsSam3 ? "inline-flex" : "none";
             tools[name].disabled = Boolean(state.pendingPreview || state.pendingH3 || state.mismatchBlocked);
@@ -942,6 +1036,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         if (modeIsSam3) {
             queueHint.textContent = trackReady ? "Трек готов · H3 доступен" : frameReady ? "Кадр готов · нажмите «Отследить видео»" : "Сначала рассчитайте кадр SAM3";
         } else queueHint.textContent = "Подготовка не запускает полный граф";
+        showRequestProgress();
     }
 
     function clearPreviewCaches() {
@@ -986,7 +1081,7 @@ export function createUniversalMaskEditor(node, options = {}) {
     }
 
     function hasIndependentAnchor() {
-        if (sam3Mode() && documentState.sam3?.prompt) return true;
+        if (sam3Mode() && sam3Objects().length) return true;
         return Object.values(documentState.frames || {}).some((bucket) => {
             const events = parseEvents(bucket);
             return events.length > 0 && bucket?.inherit !== true;
@@ -1146,6 +1241,7 @@ export function createUniversalMaskEditor(node, options = {}) {
                 direction: sam3Direction(existing.direction || directionSelect.value),
                 seed_token: String(existing.seed_token || state.sam3.seedToken || ""),
                 ...(existing.prompt ? { prompt: clone(existing.prompt) } : {}),
+                ...(existing.objects ? { objects: clone(existing.objects) } : {}),
             };
             state.sam3.seedToken = payload.sam3.seed_token;
         }
@@ -1197,7 +1293,7 @@ export function createUniversalMaskEditor(node, options = {}) {
             const bucket = documentState.frames[key];
             return Object.prototype.hasOwnProperty.call(bucket || {}, "inherit") || parseEvents(bucket).length;
         }).map(Number);
-        if (sam3Mode() && documentState.sam3?.prompt) derived.push(Number(documentState.sam3.prompt.frame));
+        if (sam3Mode()) for (const object of sam3Objects()) derived.push(Number(object.frame));
         return [...new Set([...explicitAnchors(documentState), ...(state.metadataAnchors || []), ...derived])]
             .filter((frame) => Number.isFinite(frame) && frame >= 0 && frame < state.frameCount)
             .sort((a, b) => a - b);
@@ -1345,15 +1441,35 @@ export function createUniversalMaskEditor(node, options = {}) {
             }
         }
         const sam3Badge = sam3Mode() ? ` · SAM3 ${sam3TrackReady() ? "трек" : sam3FrameReady() ? "кадр" : "черновик"}` : "";
-        const pointPrompt = sam3Mode() && Number(documentState.sam3?.prompt?.frame) === state.frame ? documentState.sam3.prompt : null;
-        for (const [index, point] of (pointPrompt?.points || []).entries()) {
-            const x = box.offsetX + point[0] * box.drawnWidth, y = box.offsetY + point[1] * box.drawnHeight;
-            const positive = pointPrompt.labels?.[index] !== 0;
-            ctx.save(); ctx.fillStyle = positive ? "#247b45" : "#a32b35"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
-            ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-            ctx.beginPath(); ctx.moveTo(x - 3, y); ctx.lineTo(x + 3, y);
-            if (positive) { ctx.moveTo(x, y - 3); ctx.lineTo(x, y + 3); }
-            ctx.stroke(); ctx.restore();
+        const pointObjects = sam3Mode() ? sam3Objects() : [];
+        for (const [objectIndex, pointPrompt] of pointObjects.entries()) {
+            if (Number(pointPrompt.frame) !== state.frame) continue;
+            const active = objectIndex === state.activeSam3Object;
+            ctx.save();
+            ctx.globalAlpha = active ? 1 : .65;
+            ctx.font = "bold 12px sans-serif";
+            if (!pointPrompt.points && frameNeedsDraft(state.frame)) {
+                const x = box.offsetX + pointPrompt.x * box.drawnWidth;
+                const y = box.offsetY + pointPrompt.y * box.drawnHeight;
+                ctx.strokeStyle = "#fff"; ctx.fillStyle = "#fff";
+                ctx.setLineDash?.([4, 4]);
+                ctx.strokeRect?.(x, y, pointPrompt.w * box.drawnWidth, pointPrompt.h * box.drawnHeight);
+                ctx.fillText?.(String(objectIndex + 1), x + 4, y + 14);
+            }
+            for (const [index, point] of (pointPrompt.points || []).entries()) {
+                const x = box.offsetX + point[0] * box.drawnWidth, y = box.offsetY + point[1] * box.drawnHeight;
+                const positive = pointPrompt.labels?.[index] !== 0;
+                ctx.fillStyle = positive ? "#247b45" : "#a32b35"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
+                ctx.beginPath(); ctx.arc(x, y, active ? 8 : 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(x - 3, y); ctx.lineTo(x + 3, y);
+                if (positive) { ctx.moveTo(x, y - 3); ctx.lineTo(x, y + 3); }
+                ctx.stroke();
+                if (index === 0 && pointObjects.length > 1) {
+                    ctx.fillStyle = "#fff";
+                    ctx.fillText?.(String(objectIndex + 1), x + 10, y + 4);
+                }
+            }
+            ctx.restore();
         }
         canvasBadge.textContent = `${state.view === "overlay" ? "Наложение" : state.view === "mask" ? "Маска" : "Источник"}${sam3Badge} · Масштаб ${Math.round(state.zoom * 100)}%`;
         zoomReadout.textContent = `${Math.round(state.zoom * 100)}%`;
@@ -1402,7 +1518,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         for (const [key, control] of Object.entries(tools)) { control.setAttribute("aria-pressed", String(key === mode)); control.style.outline = key === mode ? `2px solid ${COLORS.accentStrong}` : "none"; control.style.background = key === mode ? COLORS.selected : COLORS.panel2; }
         canvas.style.cursor = mode === "brush" || mode === "erase" ? "crosshair" : "cell";
         if (mode.startsWith("sam_")) {
-            setStatus(mode === "sam_remove" ? "Кликните по лишней области. SAM3 обновит предпросмотр кадра." : mode === "sam_add" ? "Кликните по пропущенной части объекта. SAM3 обновит предпросмотр кадра." : "Кликните по объекту для предпросмотра SAM3. Трекинг запускается отдельно кнопкой «Отследить видео».");
+            setStatus(mode === "sam_remove" ? "Кликните по лишней области активного объекта." : mode === "sam_add" ? "Кликните по пропущенной части активного объекта." : "Кликните по объекту, чтобы добавить его к общей маске. Трекинг запускается отдельно.");
             return;
         }
         setStatus(mode === "polygon" ? "Полигон: кликайте вершины, Enter или двойной клик — завершить." : mode === "rect" ? (sam3Mode() ? "SAM3: обведите объект рамкой, затем нажмите «Рассчитать кадр»." : state.grabcut ? state.refineMethod === "sam3" ? "SAM3: обведите объект близко к границам, затем нажмите «Рассчитать маску»." : "GrabCut: обведите объект и немного фона, затем нажмите «Рассчитать маску»." : "Прямоугольник: протяните область для маски.") : mode === "erase" ? "Ластик: стирает зелёную маску; правка сохранится для повторного трекинга." : "Кисть: добавляет область в маску; правка сохранится для повторного трекинга.");
@@ -1705,6 +1821,9 @@ export function createUniversalMaskEditor(node, options = {}) {
         state.refinementError = typeof rawMeta?.refinement_error === "string" ? refinementMessage(rawMeta.refinement_error) : "";
         if (state.refinementError) state.previewStale = true;
         applySam3Metadata(rawMeta?.sam3, completedRequestKind);
+        if (framePatch?.object_map) {
+            state.sam3HitMap = { url: framePatch.object_map, signature: sam3SeedSignature(framePatch.frame) };
+        }
         ingestDescriptors(output, { allowMask: !state.refinementError });
         setPrepareBusy(false);
         state.frame = clamp(state.frame, 0, Math.max(0, state.frameCount - 1));
@@ -1758,7 +1877,15 @@ export function createUniversalMaskEditor(node, options = {}) {
         if (event.points && event.points.length > MAX_POINTS_PER_STROKE) event.points = event.points.slice(0, MAX_POINTS_PER_STROKE);
         const isSam3Seed = sam3Mode() && event?.type === "rect";
         if (isSam3Seed) {
-            if (documentState.sam3) delete documentState.sam3.prompt;
+            if (sam3Objects().length || hasSam3Seed(state.frame)) {
+                const objects = editableSam3Objects();
+                if (!objects || !canAddSam3Object(objects)) return false;
+                const { x, y, w, h } = event;
+                objects.push({ frame: state.frame, x, y, w, h });
+                writeSam3Objects(objects, objects.length - 1, "Добавлена рамка SAM3");
+                setStatus("Нажмите «Рассчитать кадр», чтобы увидеть общую маску.", "dirty");
+                return true;
+            }
             event = { ...event, refine: true, refine_method: "sam3" };
             // A new seed changes the SAM3 identity. Manual brush/erase events
             // never rotate this token, so retracking can preserve them.
@@ -1773,34 +1900,119 @@ export function createUniversalMaskEditor(node, options = {}) {
         diagnostics.record("mask.edit", { type: event.type, mode: event.mode, refine: Boolean(event.refine), refineMethod: event.refine ? event.refine_method || "grabcut" : undefined, points: event.points?.length || 0 }); return true;
     }
 
-    function selectSam3Point(point, tool) {
-        if (!sam3Mode() || state.destroyed || state.pendingPreview || state.pendingH3 || state.mismatchBlocked) return false;
-        const existing = documentState.sam3?.prompt;
-        const append = tool !== "sam_point";
-        if (append && (!existing?.points?.length || Number(existing.frame) !== state.frame)) {
-            setStatus("Сначала выберите объект кликом на этом кадре.", "warn"); return false;
+    function editableSam3Objects() {
+        const explicit = sam3Objects();
+        const seed = explicit[0]?.frame ?? state.sam3.frame;
+        if ((explicit.length || (seed != null && hasSam3Seed(seed))) && Number(seed) !== state.frame) {
+            setStatus(`Добавляйте и уточняйте объекты на опорном кадре ${Number(seed) + 1}.`, "warn");
+            return null;
         }
-        if (append && existing.points.length >= 64) { setStatus("Достигнут лимит 64 точек. Отмените лишние точки или выберите объект заново.", "warn"); return false; }
-        const prompt = append ? clone(existing) : { frame: state.frame, points: [], labels: [] };
-        prompt.points.push([Number(point.x.toFixed(6)), Number(point.y.toFixed(6))]);
-        prompt.labels.push(tool === "sam_remove" ? 0 : 1);
-        // Replace only object seeds. Brush/eraser corrections remain in their
-        // original per-frame event logs and survive both preview and tracking.
-        for (const [key, bucket] of Object.entries(documentState.frames || {})) {
-            const events = parseEvents(bucket);
-            const retained = events.filter(event => !(event.type === "rect" && (event.refine_method === "sam3" || event.sam3_prompt)));
-            if (retained.length !== events.length) documentState.frames[key] = { ...bucket, events: retained };
-        }
-        state.sam3.seedToken = makeSeedToken(); state.sam3.frame = state.frame;
-        documentState.sam3 = { ...(documentState.sam3 || {}), action: "frame", frame: state.frame, direction: sam3Direction(directionSelect.value), seed_token: state.sam3.seedToken, prompt };
+        if (explicit.length) return clone(explicit);
+        return eventsAt(state.frame).filter(isSam3Box).map(({ x, y, w, h }) => ({ frame: state.frame, x, y, w, h }));
+    }
+
+    function canAddSam3Object(objects) {
+        if (objects.length < MAX_SAM3_OBJECTS) return true;
+        setStatus(`В одной маске доступно до ${MAX_SAM3_OBJECTS} объектов SAM3.`, "warn");
+        return false;
+    }
+
+    function writeSam3Objects(objects, active, historyLabel) {
+        // Promote old rectangle prompts on the seed frame into the explicit
+        // object list. Leave all manual per-frame edit events in place.
+        const bucket = frameBucket(state.frame);
+        if (bucket) bucket.events = parseEvents(bucket).filter(event => !isSam3Box(event));
+        state.sam3.seedToken = objects.length ? makeSeedToken() : "";
+        state.sam3.frame = state.frame;
+        state.activeSam3Object = active;
+        const sam3 = { action: "frame", frame: state.frame, direction: sam3Direction(directionSelect.value), seed_token: state.sam3.seedToken };
+        if (objects.length === 1) sam3.prompt = objects[0];
+        else if (objects.length) sam3.objects = objects;
+        documentState.sam3 = sam3;
         state.refinementError = ""; state.previewStale = true; state.resetBlank = true;
         state.view = "overlay";
         for (const [name, item] of Object.entries(viewButtons)) item.style.background = name === "overlay" ? COLORS.selected : COLORS.panel2;
         invalidateSam3({ frame: true, track: true });
-        pushHistory(tool === "sam_remove" ? "Точка исключения SAM3" : append ? "Точка уточнения SAM3" : "Объект выбран кликом");
+        pushHistory(historyLabel);
         commit({ markDirty: true, sam3Action: "frame" }); updateReadouts(); draw();
-        diagnostics.record("sam3.point", { tool, points: prompt.points.length, frame: state.frame });
-        requestSam3("frame"); return true;
+        updateActionAvailability();
+    }
+
+    function selectSam3Point(point, tool) {
+        if (!sam3Mode() || state.destroyed || state.pendingPreview || state.pendingH3 || state.mismatchBlocked) return false;
+        const objects = editableSam3Objects();
+        if (!objects) return false;
+        const append = tool !== "sam_point";
+        const active = append ? state.activeSam3Object : objects.length;
+        if (!append && !canAddSam3Object(objects)) return false;
+        const prompt = append ? objects[active] : { frame: state.frame, points: [], labels: [] };
+        if (!prompt?.points) {
+            setStatus("Для точек «+» и «−» выберите объект, созданный прицелом.", "warn");
+            return false;
+        }
+        if (prompt.points.length >= 64) { setStatus("Достигнут лимит 64 точек на объект.", "warn"); return false; }
+        prompt.points.push([Number(point.x.toFixed(6)), Number(point.y.toFixed(6))]);
+        prompt.labels.push(tool === "sam_remove" ? 0 : 1);
+        objects[active] = prompt;
+        writeSam3Objects(objects, active, tool === "sam_remove" ? "Точка исключения SAM3" : append ? "Точка уточнения SAM3" : "Добавлен объект SAM3");
+        diagnostics.record("sam3.point", { tool, points: prompt.points.length, frame: state.frame, objects: objects.length });
+        requestSam3("frame");
+        return true;
+    }
+
+    async function removeSam3At(event) {
+        if (!sam3Mode() || event.button !== 2 || state.playing) return;
+        const point = pointFromEvent(event);
+        if (!point) return;
+        event.preventDefault();
+        event.stopPropagation?.();
+        if (state.pendingPreview || state.pendingH3 || state.mismatchBlocked) return;
+        const objects = editableSam3Objects();
+        if (!objects?.length) return;
+
+        const box = geometry();
+        let nearest = null;
+        for (const [object, prompt] of objects.entries()) {
+            for (const [index, [x, y]] of (prompt.points || []).entries()) {
+                const distance = Math.hypot((point.x - x) * box.drawnWidth * box.clientScaleX, (point.y - y) * box.drawnHeight * box.clientScaleY);
+                if (distance <= 12 && (!nearest || distance < nearest.distance || (distance === nearest.distance && object === state.activeSam3Object))) {
+                    nearest = { object, index, distance };
+                }
+            }
+        }
+        let object = nearest?.object;
+        let removeObject = !nearest;
+        if (nearest) {
+            const { points, labels } = objects[object];
+            points.splice(nearest.index, 1);
+            labels.splice(nearest.index, 1);
+            removeObject = !labels.includes(1);
+        } else {
+            if (state.view === "source") return;
+            const frame = state.frame;
+            const signature = sam3SeedSignature(frame);
+            if (state.sam3HitMap?.signature !== signature) {
+                setStatus("Нажмите «Рассчитать кадр», затем кликните по области ещё раз.", "warn");
+                return;
+            }
+            const image = await loadImage(state.sam3HitMap.url);
+            if (!image || state.destroyed || frame !== state.frame || state.pendingPreview || state.pendingH3 || state.mismatchBlocked || sam3SeedSignature(frame) !== signature) return;
+            const sampler = document.createElement("canvas");
+            sampler.width = 1; sampler.height = 1;
+            const context = sampler.getContext("2d");
+            if (!context) return;
+            const x = Math.min(image.naturalWidth - 1, Math.floor(point.x * image.naturalWidth));
+            const y = Math.min(image.naturalHeight - 1, Math.floor(point.y * image.naturalHeight));
+            context.drawImage(image, x, y, 1, 1, 0, 0, 1, 1);
+            const bits = context.getImageData(0, 0, 1, 1).data[0];
+            object = state.activeSam3Object;
+            if (!(bits & (1 << object))) object = objects.findLastIndex((_, index) => bits & (1 << index));
+            if (object < 0) return;
+        }
+        if (removeObject) objects.splice(object, 1);
+        writeSam3Objects(objects, clamp(object, 0, Math.max(0, objects.length - 1)), removeObject ? "Объект SAM3 удалён" : "Точка SAM3 удалена");
+        if (objects.length) requestSam3("frame");
+        else setStatus("Выделение очищено. Кликните по следующему объекту.", "dirty");
     }
 
     function finishPolygon() { if (state.polygon.length < 3) { state.polygon = []; draw(); return; } addEvent({ type: "polygon", mode: "add", points: clone(state.polygon) }, "Полигон добавлен"); state.polygon = []; draw(); }
@@ -1892,6 +2104,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         canvas.releasePointerCapture?.(event.pointerId);
     });
     canvas.addEventListener("auxclick", (event) => { if (event.button === 1) { event.preventDefault?.(); event.stopPropagation?.(); } });
+    canvas.addEventListener("contextmenu", removeSam3At);
 
     function stopPlayback() { if (state.timer) { clearTimeout(state.timer); state.timer = null; } state.playing = false; setButtonIcon(play, "play", "Воспроизвести", "Воспроизвести · Space"); updateBrushCursor(state.lastPointer); }
     async function playbackTick() {
@@ -1907,6 +2120,12 @@ export function createUniversalMaskEditor(node, options = {}) {
     function previousKey(direction) { const keys = state.anchors.filter((frame) => direction < 0 ? frame < state.frame : frame > state.frame).sort((a, b) => direction < 0 ? b - a : a - b); if (keys.length) setFrame(keys[0], { source: "key" }); else setStatus(direction < 0 ? "Предыдущего ключа нет." : "Следующего ключа нет.", "warn"); }
 
     for (const tool of ["sam_point", "sam_add", "sam_remove"]) tools[tool].addEventListener("click", () => { if (sam3Mode()) chooseMode(tool); });
+    objectSelect.addEventListener("change", () => {
+        state.activeSam3Object = Number(objectSelect.value);
+        const frame = sam3Objects()[state.activeSam3Object]?.frame;
+        if (frame != null && frame !== state.frame) { stopPlayback(); setFrame(frame, { source: "sam3-object" }); }
+        else draw();
+    });
     tools.brush.addEventListener("click", () => chooseMode("brush")); tools.erase.addEventListener("click", () => chooseMode("erase")); tools.rect.addEventListener("click", () => chooseMode("rect")); tools.polygon.addEventListener("click", () => chooseMode("polygon"));
     function updateRefineControls() {
         const modeIsSam3 = sam3Mode();
@@ -1985,7 +2204,7 @@ export function createUniversalMaskEditor(node, options = {}) {
     first.addEventListener("click", () => setFrame(0, { source: "nav" })); last.addEventListener("click", () => setFrame(state.frameCount - 1, { source: "nav" })); back.addEventListener("click", () => move(-1)); next.addEventListener("click", () => move(1)); back10.addEventListener("click", () => move(-10)); next10.addEventListener("click", () => move(10)); previousKeyButton.addEventListener("click", () => { stopPlayback(); previousKey(-1); }); nextKeyButton.addEventListener("click", () => { stopPlayback(); previousKey(1); }); play.addEventListener("click", togglePlayback); speed.addEventListener("change", () => { state.playbackSpeed = number(speed.value, 1); });
     fit.addEventListener("click", () => { state.zoom = 1; state.panX = 0; state.panY = 0; draw(); }); zoomOut.addEventListener("click", () => zoomBy(.8)); zoomIn.addEventListener("click", () => zoomBy(1.25));
     undo.addEventListener("click", () => { if (state.historyIndex > 0) restoreHistory(state.historyIndex - 1); else setStatus("Отменять больше нечего.", "warn"); }); redo.addEventListener("click", () => { if (state.historyIndex + 1 < state.history.length) restoreHistory(state.historyIndex + 1); else setStatus("Повторять больше нечего.", "warn"); });
-    clear.addEventListener("click", () => { if (state.mismatchBlocked) return; const bucket = frameBucket(state.frame, true); bucket.events = []; bucket.inherit = false; delete bucket.cleared; if (sam3Mode() && state.sam3.frame === state.frame) { if (documentState.sam3) { delete documentState.sam3.prompt; documentState.sam3.seed_token = ""; } state.sam3.seedToken = ""; invalidateSam3({ frame: true, track: true, reason: "Выделение опорного кадра очищено — задайте новую рамку SAM3." }); } else if (sam3Mode()) invalidateSam3({ track: true, reason: "Покадровая правка требует повторного трекинга." }); pushHistory(`Кадр ${state.frame + 1} очищен`); commit({ markDirty: true }); updateReadouts(); draw(); setStatus(`Кадр ${state.frame + 1} очищен.`, "dirty"); });
+    clear.addEventListener("click", () => { if (state.mismatchBlocked) return; const bucket = frameBucket(state.frame, true); bucket.events = []; bucket.inherit = false; delete bucket.cleared; if (sam3Mode() && state.sam3.frame === state.frame) { if (documentState.sam3) { delete documentState.sam3.prompt; delete documentState.sam3.objects; documentState.sam3.seed_token = ""; } state.sam3.seedToken = ""; state.resetBlank = true; invalidateSam3({ frame: true, track: true, reason: "Выделение опорного кадра очищено." }); } else if (sam3Mode()) invalidateSam3({ track: true, reason: "Покадровая правка требует повторного трекинга." }); pushHistory(`Кадр ${state.frame + 1} очищен`); commit({ markDirty: true }); updateReadouts(); updateActionAvailability(); draw(); setStatus(`Кадр ${state.frame + 1} очищен.`, "dirty"); });
     copyPrevious.addEventListener("click", () => {
         if (state.mismatchBlocked) return;
         const candidates = Object.keys(documentState.frames || {}).map(Number).filter((frame) => frame < state.frame && parseEvents(documentState.frames[String(frame)]).length > 0).sort((a, b) => b - a);
@@ -1994,7 +2213,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         documentState.frames[String(state.frame)] = clone(documentState.frames[String(sourceFrame)]);
         if (sam3Mode()) {
             const copiedSeed = eventsAt(state.frame).some(event => event.type === "rect" && (event.refine_method === "sam3" || event.refine === true));
-            if (copiedSeed) {
+            if (copiedSeed && !sam3Objects().length) {
                 state.sam3.seedToken = makeSeedToken();
                 documentState.sam3 = { ...(documentState.sam3 || {}), action: "frame", frame: state.frame, seed_token: state.sam3.seedToken };
                 delete documentState.sam3.prompt;
@@ -2119,7 +2338,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         const seedFrame = state.sam3.frame;
         const framePatch = sam3Action === "frame" && Boolean(state.source?.fingerprint)
             && state.frameItems.has(seedFrame) && hasSam3Seed(seedFrame);
-        const pending = { revision: state.editRevision, snapshot: widgetSnapshot(node), kind, sam3Action, sam3Signature: sam3Action ? sam3ReadinessSignature() : "", sourceKey: currentSourceKey(), promptId: null, framePatch, seedFrame };
+        const pending = { revision: state.editRevision, snapshot: widgetSnapshot(node), kind, sam3Action, sam3Signature: sam3Action ? sam3ReadinessSignature() : "", sourceKey: currentSourceKey(), promptId: null, framePatch, seedFrame, submittedAt: Date.now() };
         state.pendingPreview = pending;
         state.pendingRequestKind = kind;
         state.refinementBusy = kind === "refinement" || Boolean(sam3Action);
@@ -2145,8 +2364,9 @@ export function createUniversalMaskEditor(node, options = {}) {
                 const result = await queueApi.queuePrompt(0, scoped, { partialExecutionTargets: [String(node.id)] });
                 if (state.pendingPreview !== pending) return false;
                 setPendingPromptId("preview", result);
+                showRequestProgress();
                 diagnostics.record("preview.queued", { kind, promptId: promptIdFromResult(result) });
-                if (state.pendingPreview) setStatus(kind === "refinement" ? "Уточнение поставлено в очередь. H3 не запускается." : sam3Action === "frame" ? "Расчёт кадра поставлен в очередь. H3 не запускается." : sam3Action === "track" ? "Трекинг поставлен в очередь. H3 не запускается." : "Предпросмотр поставлен в очередь. Этот запрос рассчитывает только маску.");
+                if (!pending.startedAt) setStatus(kind === "refinement" ? "Уточнение поставлено в очередь. H3 не запускается." : sam3Action === "frame" ? "Расчёт кадра поставлен в очередь. H3 не запускается." : sam3Action === "track" ? "Трекинг поставлен в очередь. H3 не запускается." : "Предпросмотр поставлен в очередь. Этот запрос рассчитывает только маску.");
             } catch (error) {
                 if (state.pendingPreview !== pending) return false;
                 diagnostics.record("preview.failed", { kind, message: diagnosticText(error?.message), stack: diagnosticText(error?.stack) });
@@ -2165,7 +2385,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         if (!sam3Mode() || state.destroyed || state.pendingPreview || state.pendingH3 || state.mismatchBlocked) return false;
         const seedFrame = Number.isFinite(Number(state.sam3.frame)) ? Math.max(0, Math.round(Number(state.sam3.frame))) : state.frame;
         const currentHasSeed = hasSam3Seed(state.frame);
-        const hasAnySeed = Boolean(documentState.sam3?.prompt) || Object.keys(documentState.frames || {}).some((key) => hasSam3Seed(Number(key)));
+        const hasAnySeed = Boolean(sam3Objects().length) || Object.keys(documentState.frames || {}).some((key) => hasSam3Seed(Number(key)));
         if (action === "frame" && !currentHasSeed && hasAnySeed) {
             setStatus(`Выделение SAM3 находится на кадре ${seedFrame + 1}. Выберите его или кликните по объекту на текущем кадре.`, "warn");
             return false;
@@ -2203,27 +2423,39 @@ export function createUniversalMaskEditor(node, options = {}) {
         setStatus("Отмена своего запроса отправлена…", "warn");
         return true;
     }
-    function requestQueue() {
-        if (state.destroyed || actionBlocked() || state.pendingH3 || state.pendingPreview || (sam3Mode() && !sam3TrackReady())) {
-            if (sam3Mode() && !sam3TrackReady()) setStatus("H3 доступен только после успешного полного трекинга SAM3.", "warn");
+    async function requestQueue() {
+        if (state.destroyed) return false;
+        if (state.pendingH3 || state.pendingPreview || state.refinementBusy) {
+            setStatus("Дождитесь завершения текущего расчёта.", "warn");
+            return false;
+        }
+        if (actionBlocked()) return false;
+        if (sam3Mode() && !sam3TrackReady()) {
+            const nextStep = sam3FrameReady() ? "«Отследить видео»" : "«Рассчитать кадр», затем «Отследить видео»";
+            setStatus(`В редакторе маски нажмите ${nextStep}.`, "warn");
             return false;
         }
         stopPlayback();
         if (!commit()) return false;
-        if (app?.queuePrompt) {
-            state.pendingH3 = { promptId: null, revision: state.editRevision, snapshot: widgetSnapshot(node) };
-            state.pendingRequestKind = "h3";
-            updateActionAvailability();
-            Promise.resolve()
-                .then(() => app.queuePrompt(0))
-                .then((result) => {
-                    setPendingPromptId("h3", result);
-                    if (!state.pendingH3?.promptId) finishPending("h3");
-                    setStatus("H3 поставлен в очередь.", "ok");
-                })
-                .catch((error) => { finishPending("h3"); setStatus(`Очередь H3: ${error?.message || error}`, "error"); });
-        } else setStatus("Автономный режим: H3 не поставлен, mask_data сохранён.", "warn");
-        return true;
+        if (!app?.queuePrompt) {
+            setStatus("Очередь ComfyUI недоступна. Маска сохранена.", "warn");
+            return false;
+        }
+        state.pendingH3 = { promptId: null, revision: state.editRevision, snapshot: widgetSnapshot(node), submittedAt: Date.now() };
+        state.pendingRequestKind = "h3";
+        updateActionAvailability();
+        try {
+            const result = await app.queuePrompt(0);
+            if (result === false) throw new Error("Проверьте ошибки графа в ComfyUI.");
+            setPendingPromptId("h3", result);
+            if (!state.pendingH3?.promptId) finishPending("h3");
+            setStatus("H3 поставлен в очередь.", "ok");
+            return true;
+        } catch (error) {
+            finishPending("h3");
+            setStatus(`Очередь H3: ${error?.message || error}`, "error");
+            return false;
+        }
     }
     prepare.addEventListener("click", requestPrepare); calculateFrame.addEventListener("click", () => requestSam3("frame")); trackVideo.addEventListener("click", () => requestSam3("track")); cancelRequest.addEventListener("click", cancelOwnPending); queue.addEventListener("click", requestQueue);
     recoverSource.addEventListener("click", () => {
@@ -2365,22 +2597,51 @@ export function createUniversalMaskEditor(node, options = {}) {
     };
     addApiListener("execution_error", ({ detail } = {}) => runtimeEvent(detail || {}, "execution_error"));
     addApiListener("execution_interrupted", ({ detail } = {}) => runtimeEvent(detail || {}, "execution_interrupted"));
-    const runtimeProgress = (detail = {}) => {
+    function requestForEvent(detail) {
         const pending = state.pendingPreview || state.pendingH3;
-        if (!pending) return false;
-        const eventPromptId = promptIdFromResult(detail);
-        if (pending.promptId && eventPromptId && String(pending.promptId) !== String(eventPromptId)) return false;
-        if (pending.promptId && !eventPromptId) return false;
-        const value = detail?.value ?? detail?.progress ?? detail?.percentage;
-        const max = detail?.max ?? detail?.total;
-        const suffix = Number.isFinite(Number(value)) && Number.isFinite(Number(max)) && Number(max) > 0 ? ` ${Math.round(Number(value))}/${Math.round(Number(max))}` : "";
-        const label = pending.sam3Action === "frame" ? "Расчёт кадра SAM3" : pending.sam3Action === "track" ? "Трекинг SAM3" : pending.kind === "refinement" ? "Уточнение" : "Подготовка превью";
-        setStatus(`${label}…${suffix}`, "busy");
-        diagnostics.record("preview.progress", { kind: pending.kind, value: diagnosticText(value), max: diagnosticText(max) });
-        return true;
-    };
-    addApiListener("progress", ({ detail } = {}) => runtimeProgress(detail || {}));
-    addApiListener("executing", ({ detail } = {}) => runtimeProgress(detail || {}));
+        return pending?.promptId && pending.promptId === promptIdFromResult(detail) ? pending : null;
+    }
+    function beginRequest(detail) {
+        const pending = requestForEvent(detail);
+        if (!pending || pending.startedAt) return;
+        pending.startedAt = Date.now();
+        setStatus(`${requestLabel(pending)}…`, "busy");
+        showRequestProgress();
+    }
+    function updateFrameProgress(detail) {
+        const pending = requestForEvent(detail);
+        if (pending !== state.pendingPreview || !pending || String(detail.node) !== String(node.id)) return;
+        const { phase, value, max: total } = detail;
+        if (!["sam3_track", "optical_flow", "optical_flow_corrections"].includes(phase)) return;
+        if (!Number.isInteger(value) || !Number.isInteger(total) || total < 1 || value < 0 || value > total) return;
+        const previous = pending.frameProgress;
+        const samePhase = previous?.phase === phase && previous.total === total;
+        if (samePhase && value <= previous.value) return;
+        const now = Date.now();
+        const firstAt = samePhase ? previous.firstAt : now;
+        const firstValue = samePhase ? previous.firstValue : value;
+        const samples = value - firstValue;
+        let finishAt = null;
+        if (samples >= 2 && now - firstAt >= 1000 && value < total) {
+            finishAt = now + (now - firstAt) / samples * (total - value);
+        }
+        beginRequest(detail);
+        pending.frameProgress = { phase, value, total, at: now, firstAt, firstValue, finishAt };
+        diagnostics.record("preview.progress", { kind: pending.kind, phase, value, max: total });
+        showRequestProgress();
+    }
+    addApiListener("execution_start", ({ detail } = {}) => beginRequest(detail));
+    addApiListener("executing", ({ detail } = {}) => {
+        if (detail?.node != null) beginRequest(detail);
+    });
+    addApiListener("progress", ({ detail } = {}) => beginRequest(detail));
+    addApiListener("universal_inpaint_mask_progress", ({ detail } = {}) => updateFrameProgress(detail));
+    addApiListener("execution_success", ({ detail } = {}) => {
+        const pending = requestForEvent(detail);
+        if (!pending) return;
+        finishPending(pending === state.pendingH3 ? "h3" : "preview");
+        setStatus("Расчёт завершён.", "ok");
+    });
     function destroy() {
         if (state.destroyed) return;
         state.destroyed = true;
@@ -2391,12 +2652,13 @@ export function createUniversalMaskEditor(node, options = {}) {
         window.removeEventListener?.("error", recordPageError); window.removeEventListener?.("unhandledrejection", recordPageError);
         window.removeEventListener?.("pagehide", diagnostics.flush);
         state.pendingPreview = null; state.pendingH3 = null; state.pendingPromptId = null; state.refinementBusy = false;
+        showRequestProgress();
         closeDialog(); window.removeEventListener?.("resize", draw); root.remove?.();
         diagnostics.record("editor.destroyed"); diagnostics.dispose();
     }
     window.addEventListener?.("resize", draw);
     node.addDOMWidget?.("universal_mask_editor", "THSUniversalMaskEditor", root, { serialize: false, getMinHeight: () => 740, getMaxHeight: () => 1100 });
-    const editor = { root, canvas, status, applyExecuted, handleRuntimeEvent: runtimeEvent, setFrame, commit, syncFromConfiguredWidget, destroy, loadFrame, ingestOutput, debugReport: diagnostics.report, get state() { return state; }, get document() { return documentState; } };
+    const editor = { root, canvas, status, applyExecuted, handleRuntimeEvent: runtimeEvent, setFrame, commit, requestQueue, syncFromConfiguredWidget, destroy, loadFrame, ingestOutput, debugReport: diagnostics.report, get state() { return state; }, get document() { return documentState; } };
     node.__thsUniversalMaskEditor = editor;
     if (!node.__thsUniversalMaskConfigureSync) {
         const previousOnConfigure = node.onConfigure;

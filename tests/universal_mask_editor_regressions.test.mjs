@@ -266,7 +266,7 @@ configuredNode.onConfigure({});
 assert.equal(configuredEditor.state.mode, "sam_point", "configured SAM3 mode selects click preview");
 assert.equal(configuredEditor.state.grabcut, true);
 assert.equal(configuredEditor.state.refineMethod, "sam3");
-assert.match(configuredEditor.status.textContent, /SAM3/);
+assert.match(configuredEditor.status.textContent, /общей маске/);
 
 // Direct mode switches use the same visible status/tool contract.
 const configuredTracking = find(configuredEditor.root, (item) => item.tagName === "SELECT" && item.attributes["aria-label"] === "Трекинг");
@@ -276,7 +276,7 @@ assert.equal(configuredEditor.state.grabcut, false);
 assert.doesNotMatch(configuredEditor.status.textContent, /SAM3/);
 configuredTracking.value = "sam3"; configuredTracking.dispatchEvent({ type: "change" });
 assert.equal(configuredEditor.state.mode, "sam_point");
-assert.match(configuredEditor.status.textContent, /SAM3/);
+assert.match(configuredEditor.status.textContent, /общей маске/);
 configuredEditor.destroy();
 
 console.log("universal_mask_editor_regressions: PASS");

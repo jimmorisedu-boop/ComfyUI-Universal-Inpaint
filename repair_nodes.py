@@ -204,6 +204,28 @@ def _zeros_like_shape(value: Any, shape: tuple[int, ...], *, dtype: Any = None) 
     return np.zeros(shape, dtype=dtype or value.dtype)
 
 
+def _h3_canvas_size(width: int, height: int) -> tuple[int, int]:
+    """H3 token grid: 16 pixel VAE compression and 2x2 latent patches."""
+    width, height = int(width), int(height)
+    if width < 1 or height < 1:
+        raise ValueError("H3 source width and height must be positive")
+    return (width + 31) // 32 * 32, (height + 31) // 32 * 32
+
+
+def _pad_h3_images(images: Any) -> Any:
+    """Extend the right and bottom edges without moving source pixels."""
+    count, height, width, channels = images.shape
+    canvas_width, canvas_height = _h3_canvas_size(width, height)
+    if (canvas_width, canvas_height) == (width, height):
+        return images
+    shape = (count, canvas_height, canvas_width, channels)
+    padded = images.new_empty(shape) if _is_torch(images) else np.empty(shape, dtype=images.dtype)
+    padded[:, :height, :width] = images
+    padded[:, :height, width:] = images[:, :, -1:]
+    padded[:, height:] = padded[:, height - 1:height]
+    return padded
+
+
 def _next_h3_frame_count(frame_count: int, modulo: int = 17, remainder: int = 5) -> int:
     """Smallest H3 timeline (17*n+5) containing ``frame_count`` frames."""
 
@@ -455,12 +477,7 @@ class THSUniversalH3RepairConditioning:
         anchor_source_edges=False,
         source_images=None,
     ):
-        if int(width) < 32 or int(height) < 32 or int(width) % 32 or int(height) % 32:
-            raise ValueError(
-                "H3 source canvas must be a multiple of 32 pixels on each axis; "
-                f"received {int(width)}x{int(height)}. Resize/export the input first "
-                "so source latent and conditioning geometry cannot silently diverge."
-            )
+        canvas_width, canvas_height = _h3_canvas_size(width, height)
         if anchor_source_edges and source_images is None:
             raise ValueError("source_images is required when anchor_source_edges is enabled")
         first_frame = last_frame = None
@@ -469,6 +486,9 @@ class THSUniversalH3RepairConditioning:
                 raise ValueError("source_images must contain at least one frame")
             first_frame = source_images[:1]
             last_frame = source_images[-1:]
+            if tuple(source_images.shape[1:3]) == (int(height), int(width)):
+                first_frame = _pad_h3_images(first_frame)
+                last_frame = _pad_h3_images(last_frame)
 
         # This is the installed ComfyUI H3 call, kept deliberately explicit so
         # upgrades fail loudly rather than silently inventing conditioning keys.
@@ -478,8 +498,8 @@ class THSUniversalH3RepairConditioning:
             clip=clip,
             vae=vae,
             prompt=str(prompt),
-            width=int(width),
-            height=int(height),
+            width=canvas_width,
+            height=canvas_height,
             length=int(length),
             first_frame=first_frame,
             last_frame=last_frame,
@@ -714,12 +734,7 @@ class THSUniversalH3ReferenceConditioning:
         reference_image=None,
         source_images=None,
     ):
-        if int(width) < 32 or int(height) < 32 or int(width) % 32 or int(height) % 32:
-            raise ValueError(
-                "H3 source canvas must be a multiple of 32 pixels on each axis; "
-                f"received {int(width)}x{int(height)}. Resize/export the input first "
-                "so source latent and conditioning geometry cannot silently diverge."
-            )
+        canvas_width, canvas_height = _h3_canvas_size(width, height)
         mode_value = _normalise_reference_mode(mode)
         size_value = str(ref_image_size or "match").strip().lower()
         if mode_value == "with_reference" and size_value not in REFERENCE_IMAGE_SIZES:
@@ -742,8 +757,8 @@ class THSUniversalH3ReferenceConditioning:
                 clip=clip,
                 vae=vae,
                 prompt=native_prompt,
-                width=int(width),
-                height=int(height),
+                width=canvas_width,
+                height=canvas_height,
                 length=int(length),
                 first_frame=None,
                 last_frame=None,
@@ -762,8 +777,8 @@ class THSUniversalH3ReferenceConditioning:
                 prompt=_reference_prompt(
                     str(reference_prompt or DEFAULT_REFERENCE_PROMPT)
                 ),
-                width=int(width),
-                height=int(height),
+                width=canvas_width,
+                height=canvas_height,
                 length=int(length),
                 ref_image_size=size_value,
                 vae=vae,
@@ -779,7 +794,7 @@ class THSUniversalH3ReferenceConditioning:
 
 
 class THSUniversalH3PadSource:
-    """Pad RGB/mask/audio to H3's 17*n+5 frame grid."""
+    """Pad RGB/mask to the H3 token grid and RGB/mask/audio to the H3 timeline."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -792,7 +807,13 @@ class THSUniversalH3PadSource:
                 "remainder": ("INT", {"default": 5, "min": 0, "max": 255}),
                 "silence_sample_rate": ("INT", {"default": 48_000, "min": 8_000, "max": 192_000}),
             },
-            "optional": {"audio": ("AUDIO",)},
+            "optional": {
+                "audio": ("AUDIO",),
+                "prefill": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Заполнение из соседних пикселей (Telea). Отключите для замены человека или крупного объекта.",
+                }),
+            },
         }
 
     RETURN_TYPES = ("IMAGE", "MASK", "AUDIO", "INT", "INT")
@@ -800,15 +821,23 @@ class THSUniversalH3PadSource:
     FUNCTION = "run"
     CATEGORY = CATEGORY + "/Frames"
 
-    def run(self, images, mask, model_fps=24.0, modulo=17, remainder=5, silence_sample_rate=48_000, audio=None):
+    def run(self, images, mask, model_fps=24.0, modulo=17, remainder=5, silence_sample_rate=48_000, audio=None, prefill=True):
+        mask = _normalise_mask(mask)
+        if tuple(mask.shape) != tuple(images.shape[:3]):
+            raise ValueError("source images and mask must have the same frame count and canvas")
         # Prefill only the model-facing source.  The pure helper remains a
         # geometry/audio pad contract, while the final composite still receives
         # the untouched source IMAGE from GetVideoComponents.
-        prepared_images = telea_prefill_masked(images, mask)
-        padded_images, padded_mask, padded_audio, original_count, padded_count = pad_source_inputs(
+        model_source = telea_prefill_masked(images, mask) if prefill else images
+        prepared_images = _pad_h3_images(model_source)
+        if tuple(prepared_images.shape[:3]) != tuple(mask.shape):
+            _, height, width = mask.shape
+            padded_mask = _zeros_like_shape(mask, tuple(prepared_images.shape[:3]))
+            padded_mask[:, :height, :width] = mask
+            mask = padded_mask
+        return pad_source_inputs(
             prepared_images, mask, audio, model_fps, modulo, remainder, silence_sample_rate
         )
-        return padded_images, padded_mask, padded_audio, original_count, padded_count
 
 
 class THSUniversalH3PadAudio:
@@ -1018,6 +1047,11 @@ class THSUniversalMaskedComposite:
     CATEGORY = CATEGORY + "/Output"
 
     def run(self, source, generated, repair_mask):
+        if _ndim(source) == _ndim(generated) == 4 and tuple(source.shape) != tuple(generated.shape):
+            _, height, width, _ = source.shape
+            canvas_width, canvas_height = _h3_canvas_size(width, height)
+            if tuple(generated.shape[1:3]) == (canvas_height, canvas_width):
+                generated = generated[:, :height, :width]
         return (composite_exact(source, generated, repair_mask),)
 
 

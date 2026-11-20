@@ -58,6 +58,8 @@ MAX_EDIT_FRAMES = 4096
 MAX_EVENTS = 4096
 MAX_POINTS = 65536
 MAX_POINTS_PER_EVENT = 4096
+MAX_SAM3_OBJECTS = 8
+MAX_SAM3_OBJECT_POINTS = 64
 MAX_PREVIEW_FRAMES = 48
 MAX_PREVIEW_SIZE = 640
 MAX_FLOW_DIM = 960
@@ -358,6 +360,26 @@ def optical_flow_available() -> bool:
     return cv2 is not None
 
 
+def _sam3_prompt(prompt: Any, frame: int, frame_count: int | None, label: str) -> dict[str, Any]:
+    if not isinstance(prompt, Mapping):
+        raise MaskDataError(f"{label} must be an object")
+    prompt_frame = _frame_number(prompt.get("frame", frame), frame_count, f"{label}.frame")
+    if all(name in prompt for name in ("x", "y", "w", "h")):
+        box = {name: _finite_unit(prompt[name], f"{label}.{name}") for name in ("x", "y", "w", "h")}
+        if box["w"] <= 0 or box["h"] <= 0:
+            raise MaskDataError(f"{label} width and height must be positive")
+        if box["x"] + box["w"] > 1.0 or box["y"] + box["h"] > 1.0:
+            raise MaskDataError(f"{label} extends outside [0, 1]")
+        return {**box, "frame": prompt_frame}
+    points = _points(prompt.get("points"), f"{label}.points")
+    labels = prompt.get("labels", [1] * len(points))
+    if not isinstance(labels, (list, tuple)) or len(labels) != len(points):
+        raise MaskDataError(f"{label}.labels must match points")
+    if any(isinstance(item, bool) or not isinstance(item, (int, float)) or item not in (0, 1) for item in labels):
+        raise MaskDataError(f"{label}.labels must be 0 or 1")
+    return {"points": points, "labels": [int(item) for item in labels], "frame": prompt_frame}
+
+
 def parse_mask_data(value: Any, frame_count: int | None = None, *, width: int | None = None,
                     height: int | None = None, fingerprint: str | None = None) -> dict[str, Any]:
     """Validate and canonicalize the browser's normalized edit document.
@@ -591,38 +613,22 @@ def parse_mask_data(value: Any, frame_count: int | None = None, *, width: int | 
             "direction": direction,
             "seed_token": token,
         }
-        # An optional explicit prompt is accepted for clients that keep the
-        # object box outside the per-frame event log.  It is normalized into a
-        # bounded rectangle and does not change the legacy edit schema.
         prompt = sam3_raw.get("prompt")
+        objects = sam3_raw.get("objects")
         if prompt is not None:
-            if not isinstance(prompt, Mapping):
-                raise MaskDataError("mask_data.sam3.prompt must be an object")
-            prompt_frame = _frame_number(prompt.get("frame", frame), frame_count, "sam3.prompt.frame")
-            if all(name in prompt for name in ("x", "y", "w", "h")):
-                prompt_event = {"type": "rect", "mode": "add", "sam3_prompt": True}
-                for name in ("x", "y", "w", "h"):
-                    prompt_event[name] = _finite_unit(prompt.get(name), f"sam3.prompt.{name}")
-                if prompt_event["w"] <= 0 or prompt_event["h"] <= 0:
-                    raise MaskDataError("sam3.prompt width and height must be positive")
-                if prompt_event["x"] + prompt_event["w"] > 1.0 or prompt_event["y"] + prompt_event["h"] > 1.0:
-                    raise MaskDataError("sam3.prompt extends outside [0, 1]")
-                sam3["prompt"] = {"x": prompt_event["x"], "y": prompt_event["y"],
-                                   "w": prompt_event["w"], "h": prompt_event["h"],
-                                   "frame": prompt_frame}
-            elif isinstance(prompt.get("points"), (list, tuple)):
-                points = _points(prompt.get("points"), "sam3.prompt.points")
-                labels = prompt.get("labels", [1] * len(points))
-                if not isinstance(labels, (list, tuple)) or len(labels) != len(points):
-                    raise MaskDataError("sam3.prompt.labels must match points")
-                normalized_labels: list[int] = []
-                for index, label in enumerate(labels):
-                    if isinstance(label, bool) or not isinstance(label, (int, float)) or int(label) != label or int(label) not in {0, 1}:
-                        raise MaskDataError(f"sam3.prompt.labels[{index}] must be 0 or 1")
-                    normalized_labels.append(int(label))
-                sam3["prompt"] = {"points": points, "labels": normalized_labels, "frame": prompt_frame}
-            else:
-                raise MaskDataError("sam3.prompt must contain a box or points")
+            sam3["prompt"] = _sam3_prompt(prompt, frame, frame_count, "sam3.prompt")
+        if objects is not None:
+            if prompt is not None or not isinstance(objects, list) or not 1 <= len(objects) <= MAX_SAM3_OBJECTS:
+                raise MaskDataError(f"sam3.objects must contain 1–{MAX_SAM3_OBJECTS} objects and replaces sam3.prompt")
+            sam3["objects"] = [
+                _sam3_prompt(item, frame, frame_count, f"sam3.objects[{index}]")
+                for index, item in enumerate(objects)
+            ]
+            for item in sam3["objects"]:
+                if item["frame"] != frame:
+                    raise MaskDataError("SAM3 objects must share the seed frame")
+                if "points" in item and (len(item["points"]) > MAX_SAM3_OBJECT_POINTS or 1 not in item["labels"]):
+                    raise MaskDataError(f"SAM3 object requires a positive point and at most {MAX_SAM3_OBJECT_POINTS} points")
         result["sam3"] = sam3
     return result
 
@@ -974,14 +980,19 @@ def _propagate_to(images: np.ndarray, source_mask: np.ndarray, source: int, targ
 
 
 def propagate_masks(images: np.ndarray, anchors: Mapping[int, np.ndarray], start_frame: int,
-                    end_frame: int) -> np.ndarray:
+                    end_frame: int, *, phase: str = "optical_flow") -> np.ndarray:
     """Propagate from nearest explicit anchor while preserving anchors exactly."""
 
     count, height, width = images.shape[:3]
     result = np.zeros((count, height, width), dtype=np.float32)
     if not anchors:
         return result
+    from .mask_progress import frame_progress
+
     ordered = sorted(int(frame) for frame in anchors)
+    completed = {frame for frame in ordered if start_frame <= frame <= end_frame}
+    report = frame_progress(phase, end_frame - start_frame + 1)
+    report(len(completed))
     def sweep(source: int, assign_from: int, stop_before: int, step: int) -> None:
         current = np.asarray(anchors[source], dtype=np.float32).copy()
         flow_cache: dict[tuple[int, int], Any] = {}
@@ -995,6 +1006,9 @@ def propagate_masks(images: np.ndarray, anchors: Mapping[int, np.ndarray], start
             frame = next_frame
             if (step > 0 and frame >= assign_from) or (step < 0 and frame >= assign_from):
                 result[frame] = current
+                if start_frame <= frame <= end_frame and frame not in completed:
+                    completed.add(frame)
+                    report(len(completed))
 
     # Before/after the outer anchors are one-way sweeps.  Between anchors,
     # split at the nearest-anchor midpoint so each adjacent flow is computed
@@ -1393,7 +1407,7 @@ def _build_raw_tracking_sequence(
         mask = (
             _hold_masks(images, anchor_masks, start, end)
             if tracking_mode == "keyframes"
-            else propagate_masks(images, anchor_masks, start, end)
+            else propagate_masks(images, anchor_masks, start, end, phase="optical_flow_corrections")
             if any(_frame_inherits(bucket) for bucket in frame_buckets.values())
             else independent_sequence
         )

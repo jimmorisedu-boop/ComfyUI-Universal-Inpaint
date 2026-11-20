@@ -18,11 +18,14 @@ try {
 const NODE_CLASS = "THSUniversalAutoPrompt";
 const PROMPT_TEXT_CLASS = "THSUniversalPromptText";
 const MUTE_MODE = 2;
+const PREVIEW_TIMEOUT_MS = 120_000;
 const UI_KEYS = Object.freeze({
     text: "auto_prompt_text",
     caption: "auto_prompt_caption",
     status: "auto_prompt_status",
+    instruction: "auto_prompt_instruction",
 });
+let taskFieldSequence = 0;
 
 const COLORS = Object.freeze({
     page: "var(--bg-color, #202020)",
@@ -43,6 +46,61 @@ function valueFor(output, key) {
     const value = output?.[key];
     if (Array.isArray(value)) return value.length ? String(value[0] ?? "") : "";
     return value == null ? "" : String(value);
+}
+
+function compilePromptPreview(prompt, nodeId) {
+    const id = String(nodeId);
+    let target = prompt?.output?.[id];
+    if (Object.hasOwn(target?.inputs || {}, "repair_mode")) {
+        // Preview always shows the task prompt, even when the saved graph is
+        // set to use a reference or corrected-frame guide for the next render.
+        const inputs = { ...target.inputs };
+        delete inputs.repair_mode;
+        target = { ...target, inputs };
+        prompt = { ...prompt, output: { ...prompt.output, [id]: target } };
+    }
+    if (target?.inputs?.mode !== "instruction") return previewPrompt(prompt, id);
+
+    // Text instructions are translated without looking at the clip or mask.
+    // Supply tiny inputs to the existing node only in this preview request.
+    // The saved graph and the H3 run retain their real input connections.
+    let nextId = 1;
+    while (Object.hasOwn(prompt.output, String(nextId)) || Object.hasOwn(prompt.output, String(nextId + 1))) nextId += 1;
+    const imageId = String(nextId);
+    const maskId = String(nextId + 1);
+    return {
+        ...prompt,
+        output: {
+            [id]: { ...target, inputs: { ...target.inputs, images: [imageId, 0], mask: [maskId, 0], preview_enabled: false } },
+            [imageId]: { class_type: "EmptyImage", inputs: { width: 8, height: 8, batch_size: 1, color: 0 } },
+            [maskId]: { class_type: "SolidMask", inputs: { width: 8, height: 8, value: 0 } },
+        },
+    };
+}
+
+async function promptPreviewOutput(api, promptId, nodeId) {
+    const deadline = Date.now() + PREVIEW_TIMEOUT_MS;
+    const path = `/history/${encodeURIComponent(promptId)}`;
+    while (Date.now() < deadline) {
+        const response = await api.fetchApi(path, { cache: "no-store", signal: AbortSignal.timeout(10_000) });
+        if (!response.ok) throw new Error(`ComfyUI вернул HTTP ${response.status} при проверке очереди.`);
+        const job = (await response.json())?.[promptId];
+        if (job) {
+            const messages = job.status?.messages || [];
+            if (messages.some(([type]) => type === "execution_interrupted")) throw new Error("Расчёт остановлен.");
+            const error = messages.find(([type]) => type === "execution_error")?.[1];
+            if (error) throw new Error(error.exception_message || "Не удалось выполнить запрос в ComfyUI.");
+            const output = job.outputs?.[String(nodeId)];
+            if (valueFor(output, UI_KEYS.text).trim()) return output;
+            const mask = Object.values(job.outputs || {}).find(item => item?.universal_mask_meta?.[0])?.universal_mask_meta[0];
+            if (mask?.source_mismatch) throw new Error("Источник видео изменился. Обновите маску и повторите попытку.");
+            if (mask?.sam3?.track_ready === false) throw new Error("Сначала нажмите «Отследить видео» в редакторе маски.");
+            if (mask?.has_mask === false) throw new Error("Сначала подготовьте непустую маску.");
+            throw new Error("Очередь завершилась без текста от ноды промпта.");
+        }
+        await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    throw new Error("Пока нет результата. Проверьте очередь ComfyUI.");
 }
 
 function element(tag, styles = {}) {
@@ -126,6 +184,12 @@ function decodeLink(graph, linkOrId) {
 function inputLink(graph, target, slot) {
     const input = target?.inputs?.[slot];
     return decodeLink(graph, input?.link);
+}
+
+function linkedInputNode(graph, node, name) {
+    const slot = node.inputs?.findIndex(input => input.name === name) ?? -1;
+    if (slot < 0) return null;
+    return node.getInputNode?.(slot) || findNodeById(graph, inputLink(graph, node, slot)?.originId);
 }
 
 function findTargetForSource(graph, source, sourceSlot = 0) {
@@ -308,6 +372,19 @@ function createAutoPromptPreview(node, options = {}) {
     });
     root.className = "ths-auto-prompt-preview";
     root.setAttribute?.("aria-label", "Промпт ремонта");
+    const taskLabel = element("label", { color: COLORS.text, fontSize: "12px", fontWeight: "600" });
+    taskLabel.textContent = "Что изменить?";
+    const task = element("textarea", {
+        width: "100%", boxSizing: "border-box", minHeight: "54px", resize: "vertical", padding: "7px 8px",
+        borderRadius: "5px", border: `1px solid ${COLORS.border}`, background: COLORS.input,
+        color: COLORS.text, font: "13px/1.35 Inter, Arial, sans-serif",
+    });
+    const taskId = `ths-repair-task-${++taskFieldSequence}`;
+    task.setAttribute?.("id", taskId);
+    taskLabel.setAttribute?.("for", taskId);
+    task.rows = 2;
+    task.maxLength = 500;
+    task.placeholder = "Сделай волосы седыми";
     const status = element("div", { minHeight: "27px", padding: "6px 8px", borderRadius: "5px", background: COLORS.panel2, color: COLORS.muted, fontSize: "11px", lineHeight: "1.35" });
     status.setAttribute?.("role", "status");
     status.textContent = "Подготовьте маску, затем сгенерируйте промпт по контексту.";
@@ -325,13 +402,15 @@ function createAutoPromptPreview(node, options = {}) {
     Object.assign(prompt.style, { minHeight: "90px", maxHeight: "220px", width: "100%", resize: "vertical", boxSizing: "border-box", overflow: "auto", padding: "7px 8px", borderRadius: "5px", border: `1px solid ${COLORS.border}`, background: COLORS.input, color: COLORS.text, font: "12px/1.45 Inter, Arial, sans-serif", whiteSpace: "pre-wrap" });
     const actions = element("div", { display: "flex", gap: "7px", alignItems: "center", flexWrap: "wrap" });
     const generate = button("Сгенерировать промпт", "primary");
+    const launch = button("Запустить H3", "primary");
+    launch.title = "Поставить в очередь генерацию H3 с текущей задачей и маской";
     const freeze = button("Зафиксировать");
     const applyGenerated = button("Применить новый текст");
     applyGenerated.style.display = "none";
     const note = element("span", { color: COLORS.muted, fontSize: "10px", lineHeight: "1.3" });
     note.textContent = "Частичный запуск не загружает H3. Чтобы использовать ручной текст, зафиксируйте его.";
-    actions.append(generate, freeze, applyGenerated, note);
-    root.append(status, captionLabel, caption, promptLabel, prompt, actions);
+    actions.append(generate, launch, freeze, applyGenerated, note);
+    root.append(taskLabel, task, status, captionLabel, caption, promptLabel, prompt, actions);
 
     const controller = createPromptFreezeController(node, { app });
     node.properties ||= {};
@@ -353,9 +432,40 @@ function createAutoPromptPreview(node, options = {}) {
     }
 
     function setStatus(value, tone = "normal") {
-        status.textContent = value || "—";
+        if (status.textContent !== (value || "—")) status.textContent = value || "—";
         status.style.background = tone === "warn" ? COLORS.panel2 : tone === "ok" ? COLORS.panel2 : COLORS.panel2;
         status.style.color = tone === "warn" ? COLORS.warning : tone === "ok" ? COLORS.ok : COLORS.muted;
+    }
+
+    const modeWidget = nodeWidget(node, "mode");
+    const currentMode = () => modeWidget?.value || "auto";
+    const overriddenWidgets = new Map();
+    function showWidget(name, show) {
+        const widget = nodeWidget(node, name);
+        if (!widget) return;
+        if (!overriddenWidgets.has(widget)) overriddenWidgets.set(widget, { hidden: widget.hidden, option: widget.options?.hidden });
+        const original = overriddenWidgets.get(widget);
+        widget.hidden = show ? original.hidden : true;
+        widget.options ||= {};
+        widget.options.hidden = show ? original.option : true;
+    }
+
+    function syncModeUi() {
+        const instructionMode = currentMode() === "instruction";
+        captionLabel.style.display = instructionMode ? "none" : "block";
+        caption.style.display = instructionMode ? "none" : "block";
+        launch.style.display = instructionMode ? "inline-flex" : "none";
+        generate.style.background = instructionMode ? COLORS.panel2 : COLORS.accent;
+        generate.style.color = instructionMode ? COLORS.text : COLORS.accentText;
+        note.style.display = instructionMode ? "none" : "inline";
+        freeze.style.display = instructionMode ? "none" : "inline-flex";
+        if (instructionMode) applyGenerated.style.display = "none";
+        prompt.readOnly = instructionMode;
+        promptLabel.textContent = instructionMode ? "Промпт для H3" : "Промпт ремонта H3 · можно редактировать";
+        for (const name of ["user_hint", "manual_prompt", "max_frames", "context_padding", "preview_enabled"]) {
+            showWidget(name, !instructionMode);
+        }
+        if (instructionMode && !prompt.value) setStatus("Введите задачу и запустите H3. Промпт можно посмотреть заранее.");
     }
 
     function updateFreezeLabel() {
@@ -366,6 +476,7 @@ function createAutoPromptPreview(node, options = {}) {
         freeze.setAttribute?.("aria-pressed", String(frozen));
         freeze.style.background = frozen ? COLORS.selected : COLORS.panel2;
         freeze.style.color = frozen ? COLORS.accentText : COLORS.text;
+        syncModeUi();
     }
 
     function applyPromptText(text, { generated = false, force = false } = {}) {
@@ -390,6 +501,17 @@ function createAutoPromptPreview(node, options = {}) {
         const text = valueFor(output, UI_KEYS.text);
         const observedCaption = valueFor(output, UI_KEYS.caption);
         const diagnostic = valueFor(output, UI_KEYS.status);
+        const taskOutput = Object.hasOwn(output, UI_KEYS.instruction);
+        if (currentMode() === "instruction" || taskOutput) {
+            const requested = String(nodeWidget(node, "user_hint")?.value ?? "");
+            if (currentMode() !== "instruction" || !taskOutput || valueFor(output, UI_KEYS.instruction) !== requested) {
+                return { prompt: text, applied: false, stale: true };
+            }
+            task.value = requested;
+            prompt.value = text;
+            setStatus(diagnostic || "Промпт готов.", "ok");
+            return { prompt: text, applied: true, stale: false };
+        }
         caption.textContent = observedCaption || "—";
         state.generation += 1;
         const frozen = controller.refresh();
@@ -417,27 +539,76 @@ function createAutoPromptPreview(node, options = {}) {
         return { prompt: text, caption: observedCaption, status: diagnostic, applied: !state.stale, stale: state.stale };
     }
 
+    function hasInstruction() {
+        if (String(nodeWidget(node, "user_hint")?.value || "").trim()) return true;
+        setStatus("Сначала напишите, что изменить.", "warn");
+        task.focus?.();
+        return false;
+    }
+
     async function generatePrompt() {
+        if (generate.disabled) return;
         if (controller.refresh()) {
             setStatus("Снимите фиксацию, чтобы сгенерировать новый автопромпт.", "warn");
             return;
         }
-        if (!app?.graphToPrompt || !api?.queuePrompt) {
+        if (currentMode() === "instruction" && !hasInstruction()) return;
+        if (!app?.graphToPrompt || !api?.queuePrompt || !api?.fetchApi) {
             setStatus("API частичного запуска недоступен; используйте обычную очередь Comfy после настройки маски.", "warn");
             return;
         }
+        const mode = currentMode();
+        const instruction = String(nodeWidget(node, "user_hint")?.value ?? "");
+        const isCurrent = () => currentMode() === mode && String(nodeWidget(node, "user_hint")?.value ?? "") === instruction;
         generate.disabled = true;
         try {
             setStatus("Генерируем локальный промпт…");
             const graph = graphFor(node, app);
             const promptGraph = await app.graphToPrompt(graph);
-            await api.queuePrompt(0, previewPrompt(promptGraph, node.id), { partialExecutionTargets: [String(node.id)] });
+            if (!isCurrent()) return;
+            const queued = await api.queuePrompt(0, compilePromptPreview(promptGraph, node.id), { partialExecutionTargets: [String(node.id)] });
+            const promptId = queued?.prompt_id ?? queued?.promptId ?? queued?.id;
+            if (!promptId) throw new Error("ComfyUI не вернул номер запроса.");
+            const output = await promptPreviewOutput(api, String(promptId), node.id);
+            if (isCurrent()) applyExecuted(output);
         } catch (error) {
-            setStatus(`Ошибка генерации промпта: ${error?.message || error}`, "warn");
+            if (isCurrent()) setStatus(`Ошибка генерации промпта: ${error?.message || error}`, "warn");
         } finally {
             generate.disabled = false;
         }
     }
+
+    async function launchH3() {
+        if (launch.disabled || currentMode() !== "instruction") return;
+        const graph = graphFor(node, app);
+        const repairNode = linkedInputNode(graph, node, "repair_mode");
+        const repairMode = nodeWidget(repairNode, "mode")?.value;
+        if (repairMode !== "with_reference" && repairMode !== "corrected_frame" && !hasInstruction()) return;
+        const editor = linkedInputNode(graph, node, "mask")?.__thsUniversalMaskEditor;
+        if (!editor?.requestQueue) {
+            setStatus("Подключите выход edit_mask редактора маски ко входу mask этой ноды.", "warn");
+            return;
+        }
+        launch.disabled = true;
+        try {
+            const queued = await editor.requestQueue();
+            setStatus(editor.status.textContent, queued ? "ok" : "warn");
+        } finally {
+            launch.disabled = false;
+        }
+    }
+
+    task.addEventListener("input", () => {
+        if (controller.refresh()) {
+            const result = controller.unfreeze();
+            if (!result.ok) { setStatus(result.reason, "warn"); return; }
+        }
+        setNodeWidget(node, "user_hint", task.value);
+        setNodeWidget(node, "mode", "instruction");
+        prompt.value = "";
+        syncModeUi();
+        if (task.value.trim()) setStatus("Задача сохранена. Можно запустить H3 или посмотреть промпт.");
+    });
 
     prompt.addEventListener("input", () => {
         state.edited = prompt.value !== state.generated;
@@ -452,6 +623,7 @@ function createAutoPromptPreview(node, options = {}) {
         if (state.edited) setStatus("Промпт изменён вручную; автогенерация его не перезапишет.", "warn");
     });
     generate.addEventListener("click", generatePrompt);
+    launch.addEventListener("click", launchH3);
     applyGenerated.addEventListener("click", () => {
         applyPromptText(state.generated, { force: true });
         setStatus(controller.refresh() ? "Последний автопромпт записан в независимый PromptText." : "Последний автопромпт применён к редактору.", "ok");
@@ -476,6 +648,8 @@ function createAutoPromptPreview(node, options = {}) {
                 } else if (typeof node.properties?.__thsAutoPromptDraft === "string" && !state.edited) {
                     prompt.value = node.properties.__thsAutoPromptDraft;
                 }
+                task.value = String(nodeWidget(node, "user_hint")?.value ?? "");
+                if (currentMode() === "instruction" && !controller.frozen) prompt.value = "";
                 updateFreezeLabel();
                 return result;
             };
@@ -483,6 +657,15 @@ function createAutoPromptPreview(node, options = {}) {
         };
         node.__thsAutoPromptConfigureSync = true;
     }
+    if (modeWidget) {
+        const callback = modeWidget.callback;
+        modeWidget.callback = function onPromptModeChanged(...args) {
+            const result = callback?.apply(this, args);
+            syncModeUi();
+            return result;
+        };
+    }
+    task.value = String(nodeWidget(node, "user_hint")?.value ?? "");
     updateFreezeLabel();
     node.addDOMWidget?.("auto_prompt_preview", "THSUniversalAutoPrompt", root, {
         serialize: false,
@@ -490,8 +673,8 @@ function createAutoPromptPreview(node, options = {}) {
         getMaxHeight: () => 520,
     });
     const preview = {
-        root, status, caption, prompt, generate, freeze, applyGenerated,
-        applyExecuted, generatePrompt, uiKeys: UI_KEYS, controller, state,
+        root, status, caption, task, prompt, generate, launch, freeze, applyGenerated,
+        applyExecuted, generatePrompt, launchH3, uiKeys: UI_KEYS, controller, state,
         freezePrompt: () => controller.freeze(prompt.value),
         unfreezePrompt: () => controller.unfreeze(),
         get frozen() { return controller.refresh(); },

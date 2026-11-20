@@ -40,6 +40,7 @@ py-modules = [
   "corrected_frame_nodes",
   "mask_core",
   "mask_nodes",
+  "mask_progress",
   "mask_sam3",
   "mask_sam3_video",
   "repair_nodes",

@@ -138,8 +138,11 @@ def test_scoped_sam3_frame_returns_only_changed_masks_and_a_trackable_seed(monke
     def predict(image, prompt, *, keep_loaded):
         calls.append(keep_loaded)
         np.testing.assert_array_equal(image, source[1])
-        assert prompt["labels"] == [1, 0]
-        return native_mask
+        if prompt["labels"] == [1, 0]:
+            return native_mask
+        other = np.zeros_like(native_mask)
+        other[4:18, 14:25] = True
+        return other
 
     def reject_full_preview(*args, **kwargs):
         pytest.fail("one click must not build or encode a full-clip preview")
@@ -178,3 +181,10 @@ def test_scoped_sam3_frame_returns_only_changed_masks_and_a_trackable_seed(monke
     with pytest.raises(video.SAM3VideoError, match="does not belong"):
         video._lookup_seed(normalized, saved, 1, token)
     assert ui["universal_mask_meta"][0]["sam3"]["track_ready"] is False
+
+    sam3 = document["sam3"]
+    sam3["objects"] = [sam3.pop("prompt"), {"frame": 1, "points": [[.6, .3]], "labels": [1]}]
+    grouped = THSUniversalMaskEditor().run(source, json.dumps(document), tracking_mode="sam3", grow=0, feather=0)
+    data = grouped["ui"]["universal_mask_frame_patch"][0]["object_map"].split(",", 1)[1]
+    membership = np.asarray(Image.open(io.BytesIO(base64.b64decode(data))))
+    assert list(membership[8, [2, 8, 16, 24]]) == [0, 1, 3, 2]

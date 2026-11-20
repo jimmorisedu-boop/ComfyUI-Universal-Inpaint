@@ -26,6 +26,7 @@ from .repair_nodes import (
     REFERENCE_MODES,
     _normalise_mask,
     _normalise_reference_mode,
+    _pad_h3_images,
     composite_exact,
 )
 
@@ -228,7 +229,7 @@ class THSUniversalCorrectedFrameGuide:
             latent=latent,
             frame_idx=frame_index,
             vae=vae,
-            image=merged,
+            image=_pad_h3_images(merged),
         )
         values = _node_result(result)
         if not values or values[0] is None:

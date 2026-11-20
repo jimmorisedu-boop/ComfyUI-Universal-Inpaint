@@ -1,21 +1,20 @@
 """ComfyUI node for local, mask-aware repair-prompt generation.
 
-The node is deliberately additive.  Its only model integration is the
-already-installed ``comfyui-florence2`` extension and its local
-``Florence-2-base-PromptGen-v2.0`` checkpoint.  The extension is imported and
-the model is loaded lazily, so importing this module for CPU tests does not
-import torch or contact the network.  Caption strings are cached in a small
-bounded LRU; model objects and image tensors are never kept in the cache.
+The node supports a local Florence caption path and a direct edit instruction
+path with optional local Russian translation. Both load their models lazily.
+Text results are cached without retaining models or image tensors.
 """
 
 from __future__ import annotations
 
 from collections import OrderedDict
+from functools import lru_cache
 import gc
 import hashlib
 import importlib
 import os
 from pathlib import Path
+import re
 import threading
 from typing import Any, Callable, Iterable, Protocol
 
@@ -24,13 +23,26 @@ import numpy as np
 from .auto_prompt_core import (
     DEFAULT_CONTEXT_PADDING,
     DEFAULT_REPAIR_PROMPT,
+    compose_edit_instruction_prompt,
     compose_repair_prompt,
+    normalize_edit_instruction,
     prepare_caption_inputs,
     sanitize_caption,
 )
 
 
 MODEL_NAME = "Florence-2-base-PromptGen-v2.0"
+TRANSLATION_MODEL_NAME = "opus-mt-ru-en"
+_CYRILLIC = re.compile(r"[\u0400-\u052f]")
+_QUOTED_LITERAL = re.compile(r'(«[^»]+»|“[^”]+”|"[^"]+")')
+_RUSSIAN_BOW_TIE = re.compile(r"\bгалстук[-‑– ]бабочк\w*\b", re.IGNORECASE)
+_RUSSIAN_TIE_REPLACEMENT = re.compile(
+    r"\bгалстук\s+на\s+(?P<modifiers>(?:[\w-]+\s+){0,4})бабочк\w*\b", re.IGNORECASE
+)
+_RUSSIAN_INSECT = re.compile(r"\b(?:жив\w*|лета\w*|настоящ\w*)\b", re.IGNORECASE)
+_TRANSLATED_TIE_REPLACEMENT = re.compile(
+    r"(\b(?:neck\s*)?tie\s+(?:to|with|into)\s+(?:[\w-]+\s+){0,5})butterfly\b", re.IGNORECASE
+)
 MODEL_PRECISION = "fp16"
 MODEL_ATTENTION = "sdpa"
 # PromptGen v2's descriptive task is preferable to its stylised tag/mixed
@@ -177,7 +189,10 @@ def _model_roots() -> list[Path]:
         folder_paths = importlib.import_module("folder_paths")
         get_paths = getattr(folder_paths, "get_folder_paths", None)
         if callable(get_paths):
-            roots.extend(Path(path) for path in get_paths("LLM") if path)
+            try:
+                roots.extend(Path(path) for path in get_paths("LLM") if path)
+            except KeyError:
+                pass  # A fresh ComfyUI may not register LLM model folders.
         models_dir = getattr(folder_paths, "models_dir", None)
         if models_dir:
             roots.append(Path(models_dir) / "LLM")
@@ -200,6 +215,63 @@ def _local_model_path() -> Path | None:
         if candidate.is_dir() and all((candidate / name).is_file() for name in required):
             return candidate
     return None
+
+
+def _local_translation_path() -> Path:
+    required = ("config.json", "pytorch_model.bin", "source.spm", "target.spm", "vocab.json")
+    for root in _model_roots():
+        candidate = root / TRANSLATION_MODEL_NAME
+        if all((candidate / name).is_file() for name in required):
+            return candidate
+    raise RuntimeError(
+        "Для перевода с русского установите локальную модель opus-mt-ru-en с профилем instruction. "
+        "См. docs/INSTALL_RU.md."
+    )
+
+
+@lru_cache(maxsize=32)
+def _translate_locally(path: Path, text: str) -> str:
+    """Translate unquoted fragments on CPU and keep literal signs intact."""
+    import torch
+    from transformers import MarianMTModel, MarianTokenizer
+
+    parts = _QUOTED_LITERAL.split(text)
+    indices = [index for index in range(0, len(parts), 2) if _CYRILLIC.search(parts[index])]
+    if not indices:
+        return text
+    tokenizer = MarianTokenizer.from_pretrained(path, local_files_only=True)
+    model = MarianMTModel.from_pretrained(path, local_files_only=True, weights_only=True).eval()
+    inputs = tokenizer([parts[index].strip() for index in indices], padding=True, return_tensors="pt")
+    with torch.inference_mode():
+        output = model.generate(**inputs, num_beams=4, max_new_tokens=192)
+    for index, translation in zip(indices, tokenizer.batch_decode(output, skip_special_tokens=True), strict=True):
+        translation = translation.strip()
+        if not translation or _CYRILLIC.search(translation):
+            raise RuntimeError("OPUS-MT не смог перевести задачу. Уточните формулировку.")
+        original = parts[index]
+        if index + 1 < len(parts) and not original.rstrip().endswith((".", "!", "?")):
+            translation = translation.rstrip(". ")
+        # Text-to-video instructions describe the masked subject. Marian may
+        # insert a second-person possessive after an imperative in Russian.
+        translation = re.sub(r"(?i)\b(make|recolor|dye|paint)(\s+)(?:your|my)\b", r"\1\2the", translation)
+        if _RUSSIAN_BOW_TIE.search(original):
+            translation = re.sub(r"(?i)\bbutterfly[\s-]+tie\b", "bow tie", translation)
+        replacement = _RUSSIAN_TIE_REPLACEMENT.search(original)
+        if replacement and not _RUSSIAN_INSECT.search(replacement["modifiers"]):
+            translation = _TRANSLATED_TIE_REPLACEMENT.sub(r"\1bow tie", translation, count=1)
+        parts[index] = original[: len(original) - len(original.lstrip())] + translation + original[len(original.rstrip()):]
+    return "".join(parts)
+
+
+def _instruction_prompt(request: Any) -> str:
+    text = normalize_edit_instruction(request)
+    if any(_CYRILLIC.search(part) for part in _QUOTED_LITERAL.split(text)[::2]):
+        path = _local_translation_path()
+        try:
+            text = _translate_locally(path, text)
+        except (ImportError, OSError, ValueError) as exc:
+            raise RuntimeError("Не удалось загрузить локальный переводчик. Проверьте профиль instruction и совместимость PyTorch.") from exc
+    return compose_edit_instruction_prompt(text)
 
 
 def _florence_nodes_module():
@@ -399,7 +471,7 @@ class THSUniversalAutoPrompt:
             "required": {
                 "images": ("IMAGE",),
                 "mask": ("MASK",),
-                "mode": (["auto", "manual"], {"default": "auto"}),
+                "mode": (["instruction", "auto", "manual"], {"default": "instruction"}),
                 "user_hint": ("STRING", {"default": "", "multiline": True}),
                 "manual_prompt": ("STRING", {"default": "", "multiline": True}),
             },
@@ -407,14 +479,15 @@ class THSUniversalAutoPrompt:
                 "max_frames": ("INT", {"default": 3, "min": 1, "max": 3, "step": 1}),
                 "context_padding": ("FLOAT", {"default": DEFAULT_CONTEXT_PADDING, "min": 0.0, "max": 4.0, "step": 0.05}),
                 "preview_enabled": ("BOOLEAN", {"default": True}),
+                "repair_mode": ("COMBO", {"forceInput": True}),
             },
         }
 
     @classmethod
     def VALIDATE_INPUTS(cls, mode=None, **kwargs):
-        if mode in (None, "", "auto", "manual"):
+        if mode in (None, "", "instruction", "auto", "manual"):
             return True
-        return "mode must be auto or manual"
+        return "mode must be instruction, auto or manual"
 
     def run(
         self,
@@ -426,12 +499,34 @@ class THSUniversalAutoPrompt:
         max_frames=3,
         context_padding=DEFAULT_CONTEXT_PADDING,
         preview_enabled=True,
+        repair_mode=None,
     ):
+        # AutoPrompt is also an output node. A full queue can reach it even
+        # when H3 is using an image guide, where no text task is required.
+        if repair_mode in ("with_reference", "corrected_frame"):
+            preview = _small_preview_tensor(_as_numpy(images[:1, :1, :1], label="images"))
+            return ("", "", preview)
+
+        mode_value = str(mode or "auto").strip().lower()
+        if isinstance(preview_enabled, str):
+            preview_on = preview_enabled.strip().lower() not in {"", "0", "false", "off", "no"}
+        else:
+            preview_on = True if preview_enabled is None else bool(preview_enabled)
+        if mode_value == "instruction":
+            prompt = _instruction_prompt(user_hint)
+            if preview_on:
+                preview = _preview_tensor(_as_numpy(images, label="images"), _as_numpy(mask, label="mask"))
+            else:
+                preview = _small_preview_tensor(_as_numpy(images[:1, :1, :1], label="images"))
+            return {
+                "ui": {"auto_prompt_text": [prompt], "auto_prompt_caption": [""],
+                       "auto_prompt_instruction": [str(user_hint)], "auto_prompt_status": ["Промпт сформирован из вашей задачи."]},
+                "result": (prompt, "", preview),
+            }
         source = _as_numpy(images, label="images")
         source_mask = _as_numpy(mask, label="mask")
         max_frames = max(1, min(3, int(max_frames)))
         context_padding = float(context_padding)
-        mode_value = str(mode or "auto").strip().lower()
         if mode_value not in {"auto", "manual"}:
             mode_value = "auto"
 
@@ -501,10 +596,6 @@ class THSUniversalAutoPrompt:
         else:
             status = "auto: generic masked-repair fallback used; no semantic caption was accepted."
         status = _status_join(status, diagnostic, caption_diagnostic)
-        if isinstance(preview_enabled, str):
-            preview_on = preview_enabled.strip().lower() not in {"", "0", "false", "off", "no"}
-        else:
-            preview_on = True if preview_enabled is None else bool(preview_enabled)
         preview = _preview_tensor(source, source_mask) if preview_on else _small_preview_tensor(source)
         ui = {
             "auto_prompt_text": [prompt],

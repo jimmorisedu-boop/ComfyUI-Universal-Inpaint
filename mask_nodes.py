@@ -232,6 +232,16 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
         "mask": _data_url(_mask_png_payload(mask, size), "image/png"),
         "edit_base": _data_url(_mask_png_payload(base, size), "image/png"),
     }
+    if seed.objects:
+        from PIL import Image
+
+        # Each preview pixel stores up to eight membership bits. This keeps
+        # overlapping objects independently clickable with one small image.
+        membership = np.zeros((size[1], size[0]), dtype=np.uint8)
+        for index, (_, object_mask) in enumerate(seed.objects):
+            thumbnail = Image.fromarray(object_mask).resize(size, Image.Resampling.NEAREST)
+            membership |= np.asarray(thumbnail, dtype=np.uint8) << index
+        patch["object_map"] = _data_url(_mask_png_payload(membership / 255.0, size), "image/png")
     bound_source = {"frames": count, "width": width, "height": height, "fingerprint": fingerprint}
     parsed["source"] = bound_source
     sam3["seed_token"] = seed.token

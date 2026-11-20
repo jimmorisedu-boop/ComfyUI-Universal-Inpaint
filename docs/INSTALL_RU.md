@@ -50,7 +50,20 @@ python scripts/setup.py install --comfy-root "<ComfyUI-root>" --profile h3 --app
 запускается. H3 использует нативный `comfy_extras.nodes_minimax_h3.py`
 совместимого ComfyUI.
 
-## Модели и закрытая лицензия SAM3
+## Локальный перевод задач для H3
+
+Чтобы вводить задачу для H3 по-русски в поле **«Что изменить?»**, установите
+профиль `instruction` и модель OPUS-MT. Для этого профиля нужен установленный
+PyTorch 2.6 или новее.
+
+```powershell
+python scripts/setup.py install --comfy-root "<ComfyUI-root>" --profile instruction --apply
+python scripts/setup.py download --comfy-root "<ComfyUI-root>" --profile instruction --apply
+```
+
+Перевод выполняется локально на CPU. Модель занимает около 312 МБ.
+
+## Модели H3 и доступ к SAM3
 
 Загрузка моделей — отдельная явная операция:
 

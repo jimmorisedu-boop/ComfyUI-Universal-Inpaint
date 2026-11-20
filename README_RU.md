@@ -15,7 +15,7 @@ Universal Inpaint — переносимый custom-node репозиторий 
 
 | Файл | Назначение | Нужен H3? |
 | --- | --- | --- |
-| `V70_Universal_Repair_Workbench.json` | Основной workbench: источник, маска, промпт, H3, сравнение и экспорт | Да для генерации |
+| `V70_Universal_Repair_Workbench.json` | Основной граф с автопромптом, референсом и исправленным кадром. Общие маска, сравнение и экспорт | Да для генерации |
 | `V69_Universal_Masked_Repair_MASK_ONLY.json` | Расчёт, просмотр и экспорт маски | Нет |
 | `V69_Universal_Masked_Repair.json` | Ручная маска → H3 repair | Да для генерации |
 | `V69_Universal_AutoPrompt_Repair.json` | Необязательная локальная подпись контекста | Да для генерации; caption-модель необязательна |
@@ -58,6 +58,10 @@ python scripts/setup.py install --profile editor --comfy-root "<COMFYUI_ROOT>" -
 [docs/MODELS.md](docs/MODELS.md), `scripts/setup.py`.
 
 ## Возможности и зависимости
+
+В графе H3 поле **«Что изменить?»** принимает задачу обычным текстом и
+формирует промпт при запуске. Для русского текста установите локальный
+переводчик из профиля `instruction` по [инструкции](docs/INSTALL_RU.md).
 
 - CPU: редактор, ручные правки, Optical Flow при наличии OpenCV, предпросмотр,
   точное сохранение пикселей вне маски и mask-only граф.

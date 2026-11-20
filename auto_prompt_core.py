@@ -376,6 +376,44 @@ def _compact_observation(value: str) -> str:
     return text.strip(" .,;:")[:180].rsplit(" ", 1)[0] if len(text) > 180 else text.strip(" .,;:")
 
 
+INSTRUCTION_MAX_CHARS = 500
+
+
+def normalize_edit_instruction(value: Any) -> str:
+    """Keep an edit request separate from captions and restoration defaults."""
+    text = _WHITESPACE_RE.sub(" ", str(value or "").replace("\x00", " ")).strip()
+    if len(text) > INSTRUCTION_MAX_CHARS:
+        raise ValueError(f"Опишите правку в пределах {INSTRUCTION_MAX_CHARS} символов.")
+    return text
+
+
+def compose_edit_instruction_prompt(instruction: str) -> str:
+    """Describe a local H3 edit conditioned by the source latent and mask."""
+    edit = _WHITESPACE_RE.sub(" ", instruction.replace("\x00", " ")).strip()
+    if not edit:
+        raise ValueError("Введите задачу в поле «Что изменить?».")
+    detail = ""
+    bow_tie = re.fullmatch(
+        r"(?:change|replace) (?:the )?(?:neck\s*)?tie (?:to|into|with) (?:an? |the )?"
+        r"((?:[\w-]+ ){0,4}bow tie)[.!]?", edit, re.IGNORECASE,
+    )
+    if bow_tie:
+        appearance = bow_tie[1]
+        article = "an" if appearance[0].lower() in "aeiou" else "a"
+        edit = f"Replace the necktie with {article} {appearance} at the shirt collar"
+        detail = "Keep the bow tie attached to the collar and moving with the wearer. "
+    elif re.fullmatch(r"(?:change|replace) (?:the )?door (?:to|into|with) (?:a |the )?wall[.!]?", edit, re.IGNORECASE):
+        edit = "Replace the door with a continuous section of wall"
+        detail = "Extend the adjacent wall's surface and perspective through the former doorway. "
+    if not edit.endswith((".", "!", "?")):
+        edit += "."
+    return (
+        f"{edit} {detail}"
+        "Match the source lighting and perspective. Keep the edited area consistent from frame to frame. "
+        "Preserve the source camera movement, framing, timing and all areas outside the mask."
+    )
+
+
 def compose_repair_prompt(
     captions: Iterable[Any] | Any = (),
     user_hint: Any = "",
