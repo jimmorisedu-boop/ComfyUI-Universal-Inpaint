@@ -48,6 +48,7 @@ py-modules = [
 
 [tool.setuptools.data-files]
 "web" = ["web/*"]
+"locales/ru" = ["locales/ru/nodeDefs.json"]
 "workflows" = ["workflows/*.json"]
 
 [tool.pytest.ini_options]
