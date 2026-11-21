@@ -229,6 +229,11 @@ def test_workbench_runs_three_h3_modes_through_one_mask_and_one_sampler():
     assert nodes[23]["type"] == "THSUniversalReferenceImage"
     assert nodes[23]["widgets_values"] == ["without_reference", "__none__"]
     assert nodes[22]["widgets_values"][0] == "instruction"
+    assert origin(30, "source_edit") == [22, 3]
+    assert origin(92, "source_edit") == [22, 3]
+    assert origin(30, "replacement_image") == [23, 0]
+    assert origin(30, "repair_mode") == [23, 1]
+    assert nodes[22]["outputs"][3]["type"] == "STRING"
     assert origin(22, "repair_mode") == origin(61, "mode") == origin(24, "mode") == [23, 1]
     assert origin(61, "reference_image") == origin(24, "corrected_image") == [23, 0]
     assert origin(61, "prompt") == [22, 0]

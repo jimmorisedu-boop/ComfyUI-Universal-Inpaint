@@ -43,10 +43,10 @@ REFERENCE_NONE = "__none__"
 REFERENCE_MODES = ("without_reference", "with_reference", "corrected_frame")
 REFERENCE_IMAGE_SIZES = ("match", "max")
 DEFAULT_REFERENCE_PROMPT = (
-    "Use <Picture 1> inside the user's repair mask. Apply the reference's "
-    "visual identity and appearance to the masked replacement; the replacement "
-    "may change source colors and materials to match it. Preserve the source "
-    "exactly outside the repair mask."
+    "The subject of <Picture 1> occupies the selected location in the source shot. "
+    "Reproduce this object's distinctive silhouette, construction, colors and materials. "
+    "Place it at a natural scale and orientation, lit by the scene, and moving with it. "
+    "Fill the rest of the cleared area with the surrounding scene."
 )
 DEFAULT_REFERENCE_NEGATIVE = (
     "visible seams, flicker, temporal inconsistency, distorted geometry, "
@@ -793,6 +793,91 @@ class THSUniversalH3ReferenceConditioning:
         return (positive, negative, h3_latent)
 
 
+def recolor_model_source(images, mask, color):
+    """Tint the selected material while retaining source shading in every frame."""
+    if len(color) != 7 or not color.startswith("#"):
+        raise ValueError("Для перекраски нужен цвет в формате #RRGGBB.")
+    rgb = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    tensor = _is_torch(images)
+    target = images.new_tensor(rgb) if tensor else np.asarray(rgb, dtype=images.dtype)
+    weights = [0.2126, 0.7152, 0.0722]
+    luminance = images.new_tensor(weights) if tensor else np.asarray(weights, dtype=images.dtype)
+    result = images.clone() if tensor else images.copy()
+    for index, frame in enumerate(images):
+        selected = mask[index] > 0.01
+        pixels = frame[..., :3][selected]
+        light = (pixels @ luminance)[..., None].clip(0, 1)
+        shaded = target * (0.28 + 0.72 * light ** 0.5) + (1 - target) * light ** 3 * 0.35
+        result[index, ..., :3][selected] = shaded
+    return result
+
+
+def _reference_subject(reference_image):
+    """Estimate one foreground silhouette on a bounded copy of the uploaded photo."""
+    if reference_image is None or cv2 is None:
+        return None
+    image = reference_image[0]
+    rgb = image.detach().float().cpu().numpy() if _is_torch(image) else np.asarray(image)
+    height, width = rgb.shape[:2]
+    if min(height, width) < 5:
+        return None
+    scale = min(1.0, 448 / max(height, width))
+    size = (max(5, round(width * scale)), max(5, round(height * scale)))
+    rgb = cv2.resize(rgb[..., :3].astype(np.float32), size, interpolation=cv2.INTER_AREA)
+    labels = np.zeros(rgb.shape[:2], dtype=np.uint8)
+    samples = np.uint8((rgb.clip(0, 1) * 255).round())
+    try:
+        cv2.grabCut(samples, labels, (1, 1, size[0] - 2, size[1] - 2),
+                    None, None, 4, cv2.GC_INIT_WITH_RECT)
+    except cv2.error:
+        return None
+    alpha = np.asarray(labels % 2, dtype=np.float32)
+    y, x = np.where(alpha > 0)
+    if x.size < max(9, alpha.size * 0.015):
+        return None
+    area = np.s_[y.min():y.max() + 1, x.min():x.max() + 1]
+    alpha = cv2.GaussianBlur(alpha, (3, 3), 0.65)[area]
+    return rgb[area], alpha
+
+
+def fill_selection(images, mask, strategy):
+    if strategy == "context":
+        return telea_prefill_masked(images, mask)
+    if strategy != "neutral_gray":
+        raise ValueError(f"Unknown fill strategy: {strategy}")
+    result = images.clone() if _is_torch(images) else images.copy()
+    for index, frame_mask in enumerate(mask):
+        result[index, ..., :3][frame_mask > 0.01] = 128 / 255
+    return result
+
+
+def place_reference(images, mask, reference_image, fill_strategy="context"):
+    """Seed H3 with the photographed object centred in each tracked mask."""
+    result = fill_selection(images, mask, fill_strategy)
+    subject = _reference_subject(reference_image)
+    if subject is None:
+        return result
+    rgb, alpha = subject
+    tensor = _is_torch(result)
+    for index, frame_mask in enumerate(mask):
+        matte = frame_mask.detach().float().cpu().numpy() if _is_torch(frame_mask) else np.asarray(frame_mask)
+        y, x = np.where(matte > 0.5)
+        if not x.size:
+            continue
+        width, height = x.max() - x.min() + 1, y.max() - y.min() + 1
+        scale = min(width / rgb.shape[1], height / rgb.shape[0])
+        w, h = max(1, round(rgb.shape[1] * scale)), max(1, round(rgb.shape[0] * scale))
+        left, top = x.min() + (width - w) // 2, y.min() + (height - h) // 2
+        region = np.s_[top:top + h, left:left + w]
+        patch = cv2.resize(rgb, (w, h))
+        opacity = (cv2.resize(alpha, (w, h)) * matte[region])[..., None]
+        dest = result[index][region][..., :3]
+        if tensor:
+            patch, opacity = dest.new_tensor(patch), dest.new_tensor(opacity)
+        dest[...] = dest * (1 - opacity) + patch * opacity
+    return result
+
+
 class THSUniversalH3PadSource:
     """Pad RGB/mask to the H3 token grid and RGB/mask/audio to the H3 timeline."""
 
@@ -811,8 +896,13 @@ class THSUniversalH3PadSource:
                 "audio": ("AUDIO",),
                 "prefill": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Заполнение из соседних пикселей (Telea). Отключите для замены человека или крупного объекта.",
+                    "tooltip": "Включает предварительное заполнение, когда способ подготовки не задан через source_edit или repair_mode.",
                 }),
+                "source_edit": ("STRING", {"forceInput": True}),
+                "replacement_image": ("IMAGE",),
+                "repair_mode": ("COMBO", {"forceInput": True}),
+                "fill_strategy": (["context", "neutral_gray"], {"default": "context",
+                    "tooltip": "Для удаления и замены с фото: окружение (Telea) или нейтральный серый #808080."}),
             },
         }
 
@@ -821,14 +911,26 @@ class THSUniversalH3PadSource:
     FUNCTION = "run"
     CATEGORY = CATEGORY + "/Frames"
 
-    def run(self, images, mask, model_fps=24.0, modulo=17, remainder=5, silence_sample_rate=48_000, audio=None, prefill=True):
+    def run(self, images, mask, model_fps=24.0, modulo=17, remainder=5, silence_sample_rate=48_000,
+            audio=None, prefill=True, source_edit=None, replacement_image=None, repair_mode=None, fill_strategy="context"):
         mask = _normalise_mask(mask)
         if tuple(mask.shape) != tuple(images.shape[:3]):
             raise ValueError("source images and mask must have the same frame count and canvas")
         # Prefill only the model-facing source.  The pure helper remains a
         # geometry/audio pad contract, while the final composite still receives
         # the untouched source IMAGE from GetVideoComponents.
-        model_source = telea_prefill_masked(images, mask) if prefill else images
+        preparation = source_edit or ("clear" if prefill else "keep")
+        if repair_mode == "with_reference":
+            preparation = "reference"
+        elif repair_mode == "corrected_frame":
+            preparation = "keep"
+        model_source = images
+        if preparation == "clear":
+            model_source = fill_selection(images, mask, fill_strategy)
+        elif preparation == "reference":
+            model_source = place_reference(images, mask, replacement_image, fill_strategy)
+        elif preparation != "keep":
+            model_source = recolor_model_source(images, mask, preparation)
         prepared_images = _pad_h3_images(model_source)
         if tuple(prepared_images.shape[:3]) != tuple(mask.shape):
             _, height, width = mask.shape
@@ -1048,33 +1150,45 @@ class THSUniversalMaskedComposite:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {"source": ("IMAGE",), "generated": ("IMAGE",), "repair_mask": ("MASK",)},
-                "optional": {"work_window": ("THS_H3_WINDOW",)}}
+        return {"required": {"source": ("IMAGE",), "generated": ("IMAGE", {"lazy": True}), "repair_mask": ("MASK",)},
+                "optional": {"work_window": ("THS_H3_WINDOW",), "source_edit": ("STRING", {"forceInput": True})}}
 
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("images",)
     FUNCTION = "run"
     CATEGORY = CATEGORY + "/Output"
 
-    def run(self, source, generated, repair_mask, work_window=None):
+    def check_lazy_status(self, source, generated, repair_mask, work_window=None, source_edit=None):
+        if generated is None and not (source_edit or "").startswith("#"):
+            return ["generated"]
+        return []
+
+    def run(self, source, generated, repair_mask, work_window=None, source_edit=None):
+        tint = (source_edit or "").startswith("#")
         if work_window is not None:
             w = work_window
             if tuple(source.shape[:3]) != w.shape or tuple(repair_mask.shape) != w.shape:
                 raise ValueError("H3 window does not belong to this source geometry.")
             x, y, right, bottom = w.box
             width, height = right - x, bottom - y
-            gw, gh = _h3_canvas_size(width, height)
-            if tuple(generated.shape[:3]) != (w.stop - w.first, gh, gw):
-                raise ValueError("Decoded H3 window does not match the planned time and pixel grid.")
             edit = slice(w.edit_first, w.edit_stop)
-            decoded = generated[w.edit_first-w.first:w.edit_stop-w.first, :height, :width]
-            repaired = composite_exact(w.crop(source[edit]), decoded, w.crop(repair_mask[edit]))
+            original, mask = w.crop(source[edit]), w.crop(repair_mask[edit])
+            if tint:
+                decoded = recolor_model_source(original, mask, source_edit)
+            else:
+                gw, gh = _h3_canvas_size(width, height)
+                if tuple(generated.shape[:3]) != (w.stop - w.first, gh, gw):
+                    raise ValueError("Decoded H3 window does not match the planned time and pixel grid.")
+                decoded = generated[w.edit_first-w.first:w.edit_stop-w.first, :height, :width]
+            repaired = composite_exact(original, decoded, mask)
             if w.box == (0, 0, w.shape[2], w.shape[1]) and (w.trial or (w.edit_first == 0 and w.edit_stop == len(source))):
                 return (repaired,)
             base = source[edit] if w.trial else source
             output = base.clone() if _is_torch(base) else base.copy()
             output[slice(None) if w.trial else edit, y:bottom, x:right] = repaired
             return (output,)
+        if tint:
+            generated = recolor_model_source(source, _normalise_mask(repair_mask), source_edit)
         if _ndim(source) == _ndim(generated) == 4 and tuple(source.shape) != tuple(generated.shape):
             _, height, width, _ = source.shape
             canvas_width, canvas_height = _h3_canvas_size(width, height)

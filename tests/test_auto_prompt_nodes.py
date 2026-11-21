@@ -48,8 +48,8 @@ def test_node_contract_has_mask_aware_auto_and_manual_modes():
     assert required["manual_prompt"][1]["default"] == ""
     assert inputs["optional"]["max_frames"][1]["default"] == 3
     assert inputs["optional"]["context_padding"][1]["default"] == 0.6
-    assert apn.THSUniversalAutoPrompt.RETURN_TYPES == ("STRING", "STRING", "IMAGE")
-    assert apn.THSUniversalAutoPrompt.RETURN_NAMES == ("prompt", "caption", "preview")
+    assert apn.THSUniversalAutoPrompt.RETURN_TYPES == ("STRING", "STRING", "IMAGE", "STRING")
+    assert apn.THSUniversalAutoPrompt.RETURN_NAMES == ("prompt", "caption", "preview", "source_edit")
     assert apn.THSUniversalAutoPrompt.OUTPUT_NODE is True
 
 
@@ -65,7 +65,8 @@ def test_instruction_uses_translation_as_the_intended_edit_without_captioning(mo
     mask = np.ones((2, 4, 4), dtype=np.float32)
     task = "Сделай волосы седыми"
     response = node.run(images, mask, mode="instruction", user_hint=task, manual_prompt="old text", preview_enabled=False)
-    prompt, caption, preview = response["result"]
+    prompt, caption, preview, prefill = response["result"]
+    assert prefill == "#808080"
     assert prompt.startswith("Make the hair gray.")
     assert "outside the mask" in prompt and "old text" not in prompt
     assert caption == "" and tuple(preview.shape) == (1, 1, 1, 3)
@@ -86,10 +87,11 @@ def test_image_repair_mode_runs_with_no_instruction_or_caption_model(repair_mode
     monkeypatch.setattr(apn, "_make_backend", forbidden)
     images, mask = _fixture()
     for prompt_mode in ("instruction", "auto", "manual"):
-        prompt, caption, preview = apn.THSUniversalAutoPrompt().run(
+        prompt, caption, preview, prefill = apn.THSUniversalAutoPrompt().run(
             images, mask, mode=prompt_mode, user_hint="", repair_mode=repair_mode,
         )
         assert prompt == caption == ""
+        assert prefill == ("reference" if repair_mode == "with_reference" else "keep")
         assert tuple(preview.shape) == (1, 1, 1, 3)
 
 
@@ -104,6 +106,19 @@ def test_h3_edit_prompt_describes_visible_change_and_source_continuity(edit, sta
     assert detail in prompt
     assert "from frame to frame" in prompt and "outside the mask" in prompt
     assert "<Video 1>" not in prompt
+
+
+def test_changing_task_reuses_same_mask_and_recomputes_preparation():
+    node = apn.THSUniversalAutoPrompt()
+    images, mask = _fixture()
+    for task, expected in [
+        ("Remove the sign", "clear"), ("Recolor the sign purple", "#800080"),
+        ("Replace the sign with a lantern", "keep"), ("Do not remove the sign", "keep"),
+        ("Remove the color from the sign", "keep"), ("Change the box to light blue", "#add8e6"),
+    ]:
+        result = node.run(images, mask, mode="instruction", user_hint=task, preview_enabled=False)["result"]
+        assert result[3] == expected
+        assert ("surface behind" in result[0]) == (expected == "clear")
 
 
 def test_auto_mode_calls_injected_backend_and_caches_only_strings(monkeypatch):

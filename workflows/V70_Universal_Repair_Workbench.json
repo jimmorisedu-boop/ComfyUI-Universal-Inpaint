@@ -2,7 +2,7 @@
   "id": "d021068d-52e1-5cd0-941a-7b08dd7ceb02",
   "revision": 1,
   "last_node_id": 105,
-  "last_link_id": 69,
+  "last_link_id": 73,
   "nodes": [
     {
       "id": 10,
@@ -223,6 +223,14 @@
           "name": "preview",
           "type": "IMAGE",
           "links": []
+        },
+        {
+          "name": "source_edit",
+          "type": "STRING",
+          "links": [
+            70,
+            73
+          ]
         }
       ],
       "properties": {
@@ -271,6 +279,24 @@
           "type": "AUDIO",
           "link": null,
           "shape": 7
+        },
+        {
+          "name": "source_edit",
+          "type": "STRING",
+          "link": 70,
+          "shape": 7
+        },
+        {
+          "name": "replacement_image",
+          "type": "IMAGE",
+          "link": 71,
+          "shape": 7
+        },
+        {
+          "name": "repair_mode",
+          "type": "COMBO",
+          "link": 72,
+          "shape": 7
         }
       ],
       "outputs": [
@@ -314,7 +340,8 @@
         17,
         5,
         48000,
-        false
+        false,
+        "context"
       ],
       "title": "04 · Паддинг H3 17n+5 (реальные кадры не меняются)"
     },
@@ -925,7 +952,7 @@
       "widgets_values": [
         "REPLACE_WITH_REPAIR_PROMPT",
         "REPLACE_WITH_NEGATIVE_PROMPT",
-        "Use the appearance of <Picture 1> for the masked replacement in the source shot. Follow the original motion and match the source lighting and perspective. Keep the replacement consistent across frames.",
+        "The subject of <Picture 1> occupies the selected location in the source shot. Reproduce this object's distinctive silhouette, construction, colors and materials. Place it at a natural scale and orientation, lit by the scene, and moving with it. Fill the rest of the cleared area with the surrounding scene.",
         768,
         768,
         22,
@@ -1117,6 +1144,12 @@
           "name": "work_window",
           "type": "THS_H3_WINDOW",
           "link": 68,
+          "shape": 7
+        },
+        {
+          "name": "source_edit",
+          "type": "STRING",
+          "link": 73,
           "shape": 7
         }
       ],
@@ -1416,7 +1449,8 @@
           "type": "IMAGE",
           "links": [
             55,
-            62
+            62,
+            71
           ]
         },
         {
@@ -1425,7 +1459,8 @@
           "links": [
             53,
             54,
-            61
+            61,
+            72
           ]
         }
       ],
@@ -2128,6 +2163,38 @@
       104,
       3,
       "THS_H3_WINDOW"
+    ],
+    [
+      70,
+      22,
+      3,
+      30,
+      3,
+      "STRING"
+    ],
+    [
+      71,
+      23,
+      0,
+      30,
+      4,
+      "IMAGE"
+    ],
+    [
+      72,
+      23,
+      1,
+      30,
+      5,
+      "COMBO"
+    ],
+    [
+      73,
+      22,
+      3,
+      92,
+      4,
+      "STRING"
     ]
   ],
   "groups": [

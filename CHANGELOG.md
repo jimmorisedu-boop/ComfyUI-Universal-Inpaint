@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased — SAM3 point selection
+## Unreleased — V70 repair workbench
+
+- Route text, photo reference and corrected-frame edits through one V70 graph.
+- Offer context and neutral-gray preparation for supported edits. Preserve source shading for direct recolor commands.
+- Document all three modes and the fill selector in the illustrated Russian guide.
+
+### SAM3 point selection
 
 - Click an object for a single-frame SAM3 preview, with positive and negative
   point tools for refinement. Video tracking and H3 remain explicit actions.

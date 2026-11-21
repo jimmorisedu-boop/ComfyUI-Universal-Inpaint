@@ -25,6 +25,8 @@ from .auto_prompt_core import (
     DEFAULT_REPAIR_PROMPT,
     compose_edit_instruction_prompt,
     compose_repair_prompt,
+    removal_surface,
+    target_color,
     normalize_edit_instruction,
     prepare_caption_inputs,
     sanitize_caption,
@@ -263,7 +265,7 @@ def _translate_locally(path: Path, text: str) -> str:
     return "".join(parts)
 
 
-def _instruction_prompt(request: Any) -> str:
+def _instruction_prompt(request: Any) -> tuple[str, str]:
     text = normalize_edit_instruction(request)
     if any(_CYRILLIC.search(part) for part in _QUOTED_LITERAL.split(text)[::2]):
         path = _local_translation_path()
@@ -271,7 +273,8 @@ def _instruction_prompt(request: Any) -> str:
             text = _translate_locally(path, text)
         except (ImportError, OSError, ValueError) as exc:
             raise RuntimeError("Не удалось загрузить локальный переводчик. Проверьте профиль instruction и совместимость PyTorch.") from exc
-    return compose_edit_instruction_prompt(text)
+    preparation = "clear" if removal_surface(text) else target_color(text) or "keep"
+    return compose_edit_instruction_prompt(text), preparation
 
 
 def _florence_nodes_module():
@@ -462,8 +465,8 @@ class THSUniversalAutoPrompt:
     OUTPUT_NODE = True
     FUNCTION = "run"
     CATEGORY = "Universal Inpaint/Repair"
-    RETURN_TYPES = ("STRING", "STRING", "IMAGE")
-    RETURN_NAMES = ("prompt", "caption", "preview")
+    RETURN_TYPES = ("STRING", "STRING", "IMAGE", "STRING")
+    RETURN_NAMES = ("prompt", "caption", "preview", "source_edit")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -505,7 +508,7 @@ class THSUniversalAutoPrompt:
         # when H3 is using an image guide, where no text task is required.
         if repair_mode in ("with_reference", "corrected_frame"):
             preview = _small_preview_tensor(_as_numpy(images[:1, :1, :1], label="images"))
-            return ("", "", preview)
+            return ("", "", preview, "reference" if repair_mode == "with_reference" else "keep")
 
         mode_value = str(mode or "auto").strip().lower()
         if isinstance(preview_enabled, str):
@@ -513,15 +516,19 @@ class THSUniversalAutoPrompt:
         else:
             preview_on = True if preview_enabled is None else bool(preview_enabled)
         if mode_value == "instruction":
-            prompt = _instruction_prompt(user_hint)
+            prompt, preparation = _instruction_prompt(user_hint)
+            status = {
+                "clear": "Удаление · способ заполнения задаётся в ноде «Паддинг H3».",
+                "keep": "Правка · сохраняем исходную форму и фактуру на входе H3.",
+            }.get(preparation, f"Перекраска · цвет {preparation} по маске, с исходными светом и рисунком.")
             if preview_on:
                 preview = _preview_tensor(_as_numpy(images, label="images"), _as_numpy(mask, label="mask"))
             else:
                 preview = _small_preview_tensor(_as_numpy(images[:1, :1, :1], label="images"))
             return {
                 "ui": {"auto_prompt_text": [prompt], "auto_prompt_caption": [""],
-                       "auto_prompt_instruction": [str(user_hint)], "auto_prompt_status": ["Промпт сформирован из вашей задачи."]},
-                "result": (prompt, "", preview),
+                       "auto_prompt_instruction": [str(user_hint)], "auto_prompt_status": [status]},
+                "result": (prompt, "", preview, preparation),
             }
         source = _as_numpy(images, label="images")
         source_mask = _as_numpy(mask, label="mask")
@@ -602,7 +609,7 @@ class THSUniversalAutoPrompt:
             "auto_prompt_caption": [caption_text],
             "auto_prompt_status": [status],
         }
-        return {"ui": ui, "result": (prompt, caption_text, preview)}
+        return {"ui": ui, "result": (prompt, caption_text, preview, "keep")}
 
 
 NODE_CLASS_MAPPINGS = {"THSUniversalAutoPrompt": THSUniversalAutoPrompt}

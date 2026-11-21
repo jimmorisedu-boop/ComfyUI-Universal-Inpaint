@@ -6,6 +6,8 @@ Universal Inpaint изменяет выбранный участок видео 
 
 [Открыть воркфлоу V70](workflows/V70_Universal_Repair_Workbench.json) · [Пройти пример от загрузки до экспорта](docs/USER_GUIDE_RU.md)
 
+[По тексту](docs/USER_GUIDE_RU.md#по-тексту--without_reference) · [По фотографии](docs/USER_GUIDE_RU.md#по-фотографии--with_reference) · [По исправленному кадру](docs/USER_GUIDE_RU.md#по-исправленному-кадру--corrected_frame) · [Серая заливка и окружение](docs/USER_GUIDE_RU.md#заливка-перед-h3)
+
 ![Редактор V70 с маской, рамкой H3 и кнопкой пробного запуска](docs/images/v70/flow-crop.png)
 
 ## Какие ноды появятся после установки

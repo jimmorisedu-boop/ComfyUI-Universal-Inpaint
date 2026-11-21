@@ -387,6 +387,43 @@ def normalize_edit_instruction(value: Any) -> str:
     return text
 
 
+def removal_surface(instruction: str) -> str | None:
+    """Return a visible end state for a simple removal; leave compound edits intact."""
+    text = instruction.strip().rstrip(".!?")
+    match = re.fullmatch(
+        r"(?:please\s+)?(?:remove|erase|delete|get rid of|take (?:off|away))\s+"
+        r"(?P<object>[\w'’ -]+?)(?:\s+from\s+(?P<surface>[\w'’ -]+))?", text, re.I,
+    )
+    if not match or re.search(r"\b(?:and|but|except|without|instead|only)\b", text, re.I):
+        return None
+    if re.search(r"\b(?:colou?r|hue|saturation)\b", match["object"], re.I):
+        return None
+    surface = match["surface"] or "the surface behind the selected object"
+    return surface[:1].upper() + surface[1:] + " is fully visible and uninterrupted"
+
+
+def target_color(instruction: str) -> str | None:
+    """Resolve a single explicitly requested end color. Complex edits stay with H3."""
+    from PIL import ImageColor
+
+    text = instruction.strip().lower().rstrip(".!").replace("colour", "color")
+    if not re.match(r"(?:please\s+)?(?:make|turn|change|recolor|color|dye|paint)\s", text):
+        return None
+    if re.search(r"\b(?:and|but|except|not|with|into|striped|gradient|pattern|stripes|spots|new|larger|smaller|painted|remove|replace)\b|\bto (?:a|an|the)\s", text):
+        return None
+    words = text.split()
+    extra_colors = {"burgundy": "#800020", "blond": "#e6c481", "blonde": "#e6c481"}
+    for length in (3, 2, 1):
+        if len(words) <= length + 1:
+            continue
+        name = "".join(words[-length:]).replace("-", "")
+        if name in extra_colors:
+            return extra_colors[name]
+        if name in ImageColor.colormap or re.fullmatch(r"#[0-9a-f]{3}(?:[0-9a-f]{3})?", name):
+            return "#%02x%02x%02x" % ImageColor.getrgb(name)
+    return None
+
+
 def compose_edit_instruction_prompt(instruction: str) -> str:
     """Describe a local H3 edit conditioned by the source latent and mask."""
     edit = _WHITESPACE_RE.sub(" ", instruction.replace("\x00", " ")).strip()
@@ -397,7 +434,11 @@ def compose_edit_instruction_prompt(instruction: str) -> str:
         r"(?:change|replace) (?:the )?(?:neck\s*)?tie (?:to|into|with) (?:an? |the )?"
         r"((?:[\w-]+ ){0,4}bow tie)[.!]?", edit, re.IGNORECASE,
     )
-    if bow_tie:
+    surface = removal_surface(edit)
+    if surface:
+        edit = surface
+        detail = "Continue the adjacent material, texture, edges and shading across the cleared area. "
+    elif bow_tie:
         appearance = bow_tie[1]
         article = "an" if appearance[0].lower() in "aeiou" else "a"
         edit = f"Replace the necktie with {article} {appearance} at the shirt collar"
@@ -405,6 +446,8 @@ def compose_edit_instruction_prompt(instruction: str) -> str:
     elif re.fullmatch(r"(?:change|replace) (?:the )?door (?:to|into|with) (?:a |the )?wall[.!]?", edit, re.IGNORECASE):
         edit = "Replace the door with a continuous section of wall"
         detail = "Extend the adjacent wall's surface and perspective through the former doorway. "
+    elif target_color(edit):
+        detail = "Preserve the selected object's shape, fine texture, shading and motion as its color changes. "
     if not edit.endswith((".", "!", "?")):
         edit += "."
     return (

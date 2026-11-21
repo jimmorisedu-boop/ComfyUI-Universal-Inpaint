@@ -114,6 +114,59 @@ def test_h3_padding_and_output_crop_keep_source_coordinates(backend, monkeypatch
     np.testing.assert_array_equal(output, np.where(mask_np[..., None] > 0, 0.75, images_np))
 
 
+@pytest.mark.parametrize("tensor", [False, True])
+def test_recolor_keeps_mask_geometry_source_shading_and_input(tensor):
+    images = np.zeros((2, 32, 32, 3), dtype=np.float32)
+    images[:, 8:16] = 0.15
+    images[:, 16:24] = 0.65
+    mask = np.zeros(images.shape[:3], dtype=np.float32)
+    mask[:, 8:24, 8:24] = 1
+    original = images.copy()
+    convert = pytest.importorskip("torch").from_numpy if tensor else np.asarray
+    padded = THSUniversalH3PadSource().run(convert(images), convert(mask), source_edit="#ff0000")[0]
+    result = np.asarray(padded[:2])
+    np.testing.assert_array_equal(result[mask == 0], original[mask == 0])
+    np.testing.assert_array_equal(images, original)
+    assert result[0, 12, 12, 0] > result[0, 12, 12, 1]
+    assert result[0, 20, 12, 0] > result[0, 12, 12, 0]
+    np.testing.assert_array_equal(result[0], result[1])
+    composite = THSUniversalMaskedComposite()
+    assert composite.check_lazy_status(images, None, mask, source_edit="#ff0000") == []
+    assert composite.check_lazy_status(images, None, mask, source_edit="reference") == ["generated"]
+    direct, = composite.run(convert(images), None, convert(mask), source_edit="#ff0000")
+    np.testing.assert_array_equal(np.asarray(direct), result)
+
+
+@pytest.mark.parametrize("tensor", [False, True])
+def test_neutral_fill_is_constant_and_preserves_surrounding_source(tensor):
+    convert = pytest.importorskip("torch").from_numpy if tensor else np.asarray
+    images = np.random.default_rng(4).random((2, 32, 32, 3), dtype=np.float32)
+    mask = np.zeros(images.shape[:3], dtype=np.float32)
+    mask[:, 8:16, 8:16] = 1
+    actual = THSUniversalH3PadSource().run(convert(images), convert(mask), source_edit="clear",
+                                           fill_strategy="neutral_gray")[0][:2]
+    np.testing.assert_array_equal(np.asarray(actual)[mask == 0], images[mask == 0])
+    np.testing.assert_allclose(np.asarray(actual)[mask == 1], 128 / 255)
+
+
+@pytest.mark.parametrize("fill_strategy", ["context", "neutral_gray"])
+def test_photo_subject_moves_with_mask_and_corrected_frame_retains_source(fill_strategy):
+    pytest.importorskip("cv2")
+    images = np.full((2, 64, 64, 3), 0.25, dtype=np.float32)
+    mask = np.zeros(images.shape[:3], dtype=np.float32)
+    mask[0, 12:44, 4:36] = 1
+    mask[1, 12:44, 20:52] = 1
+    photo = np.zeros((1, 40, 40, 3), dtype=np.float32)
+    photo[0, 6:34, 8:32, 0] = 1
+    pad = THSUniversalH3PadSource()
+    prepared = pad.run(images, mask, source_edit="keep", replacement_image=photo,
+                       repair_mode="with_reference", fill_strategy=fill_strategy)[0][:2]
+    assert prepared[0, 28, 20, 0] == prepared[1, 28, 36, 0] == 1
+    np.testing.assert_array_equal(prepared[mask == 0], images[mask == 0])
+    corrected = pad.run(images, mask, source_edit="clear", replacement_image=photo, repair_mode="corrected_frame")[0]
+    np.testing.assert_array_equal(corrected[:2], images)
+
+
 def test_pad_without_audio_creates_silent_audio_contract():
     images = np.zeros((5, 2, 2, 3), dtype=np.float32)
     mask = np.ones((5, 2, 2), dtype=np.float32)
@@ -123,14 +176,15 @@ def test_pad_without_audio_creates_silent_audio_contract():
     assert float(audio["waveform"].sum()) == 0.0
 
 
-def test_pad_node_can_keep_original_pixels_as_the_h3_source(monkeypatch):
+@pytest.mark.parametrize("settings", [{"prefill": False}, {"prefill": True, "source_edit": "keep"}])
+def test_pad_node_can_keep_original_pixels_as_the_h3_source(monkeypatch, settings):
     def forbidden(*args):
         pytest.fail("replacement mode should keep the original pixel values")
 
     monkeypatch.setattr("ths_universal_inpaint.repair_nodes.telea_prefill_masked", forbidden)
     images = np.random.default_rng(42).random((6, 35, 33, 3), dtype=np.float32)
     mask = np.ones(images.shape[:3], dtype=np.float32)
-    padded, padded_mask, _, original_count, padded_count = THSUniversalH3PadSource().run(images, mask, prefill=False)
+    padded, padded_mask, _, original_count, padded_count = THSUniversalH3PadSource().run(images, mask, **settings)
     assert (original_count, padded_count) == (6, 22)
     np.testing.assert_array_equal(padded[:original_count, :35, :33], images)
     assert np.count_nonzero(padded_mask[:, 35:]) == 0
