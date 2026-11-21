@@ -14,6 +14,7 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 from ths_universal_inpaint.repair_nodes import (  # noqa: E402
     DEFAULT_CORRECTED_FRAME_PROMPT,
     REFERENCE_NONE,
+    THSUniversalH3PadSource,
     THSUniversalH3ReferenceConditioning,
     THSUniversalReferenceImage,
     composite_exact,
@@ -115,7 +116,7 @@ def test_off_calls_original_h3_without_ref_images_or_image_decode(monkeypatch):
             raise AssertionError("OFF path attempted image decode")
 
     monkeypatch.setitem(sys.modules, "nodes", types.SimpleNamespace(LoadImage=RaisingLoadImage))
-    assert THSUniversalReferenceImage().run("without_reference", "missing.png") == (None, "without_reference")
+    assert THSUniversalReferenceImage().run("without_reference", "missing.png") == (None, "without_reference", "context")
 
 
 def test_on_calls_native_reference_with_tensor_vae_and_picture_label(monkeypatch):
@@ -210,7 +211,9 @@ def test_on_loader_reuses_bounded_native_load_image(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "folder_paths", folder_paths)
     monkeypatch.setitem(sys.modules, "nodes", types.SimpleNamespace(LoadImage=FakeLoadImage))
-    assert THSUniversalReferenceImage().run("with_reference", "upload/ref.png")[0] is image
+    selected = THSUniversalReferenceImage().run("with_reference", "upload/ref.png", "Без заливки")
+    assert selected[0] is image
+    assert selected[1:] == ("with_reference", "none")
     assert paths == ["upload/ref.png"]
 
 
@@ -238,6 +241,12 @@ def test_reference_loader_cache_key_is_stable_off_and_delegates_on(monkeypatch):
     monkeypatch.setitem(sys.modules, "nodes", types.SimpleNamespace(LoadImage=FakeLoadImage))
     assert THSUniversalReferenceImage.IS_CHANGED("with_reference", "input/ref.png") == "file-hash"
     assert seen == ["input/ref.png"]
+
+
+def test_reference_fill_output_matches_pad_combo_and_keeps_legacy_default():
+    fill_input = THSUniversalH3PadSource.INPUT_TYPES()["optional"]["fill_strategy"]
+    assert THSUniversalReferenceImage.RETURN_TYPES[2] == fill_input[0]
+    assert fill_input[1]["default"] == "context"
 
 
 def test_reference_graph_keeps_exact_outside_mask_composite_contract():

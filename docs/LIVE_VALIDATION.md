@@ -1,5 +1,29 @@
 # Live ComfyUI verification
 
+## V70 fill selector — 2026-11-21 (Europe/Moscow)
+
+The ComfyUI browser serialized all nine combinations of the three edit modes
+and the three fill options. Old graphs loaded with their original pad-node
+setting, including saves that serialized the upload button as a widget value.
+The live preparation checks confirmed that no fill leaves source pixels intact
+and that the photo remains connected to native H3 conditioning.
+
+On a 119-frame, 1080×1920 source clip, static, keyframe, Optical Flow and
+GrabCut mask jobs completed. Native SAM3 produced a box preview, an updated
+point preview with positive and negative points, and tracked the clip across
+all 119 frames. Direct recolor exported 119 frames at 30 fps with audio.
+
+H3 ran 12-frame trials for text removal and reference replacement with each
+fill option, a detail edit, a text replacement, and a corrected frame.
+Context fill removed the original tie. The photo replacement yielded a flower
+on the shirt both with context fill and with no fill at denoise 0.85. Gray fill
+left a visible tie silhouette in these trials. A red tie on corrected frame 3
+carried through all 12 trial frames at denoise 1.0. At 0.65 the color faded away
+after the anchor. A text edit produced silver stripes. The bow-tie replacement
+retained the original shape with the short instruction. A mask widened at the
+collar and a descriptive prompt at denoise 1.0 produced a shorter bow shape,
+with the wrong orientation. For an exact silhouette, use an image guide.
+
 ## V70 model window and short H3 trials
 
 The editor's trial and full-run buttons were exercised in a local ComfyUI browser on a 56-frame, 544×576, 24 fps clip. The marked interval was frames 17–40. An automatic 256×256 window covered the mask. The trial showed frames 21–32 in the comparison node, and the frame numbers matched their positions in the original timeline. The instruction route then saved a 56-frame H.264 file at the source dimensions and frame rate. All 32 outside-interval frame pairs matched in the comparison cache. Separate reference-image and corrected-frame trials also completed for the same interval, with the corrected guide on original frame 27. Unit tests cover the cropped audio sample offset; this particular source clip had no audio track.

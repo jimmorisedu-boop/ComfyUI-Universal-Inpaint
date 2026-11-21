@@ -42,6 +42,13 @@ CATEGORY = "Universal Inpaint"
 REFERENCE_NONE = "__none__"
 REFERENCE_MODES = ("without_reference", "with_reference", "corrected_frame")
 REFERENCE_IMAGE_SIZES = ("match", "max")
+FILL_STRATEGIES = {
+    "По окружению": "context",
+    "Нейтральный серый": "neutral_gray",
+    "Без заливки": "none",
+}
+FILL_VALUES = list(FILL_STRATEGIES.values())
+DEFAULT_FILL = "По окружению"
 DEFAULT_REFERENCE_PROMPT = (
     "The subject of <Picture 1> occupies the selected location in the source shot. "
     "Reproduce this object's distinctive silhouette, construction, colors and materials. "
@@ -522,8 +529,8 @@ class THSUniversalReferenceImage:
     ``LoadImage`` implementation after validating its bounded input path.
     """
 
-    RETURN_TYPES = ("IMAGE", "COMBO")
-    RETURN_NAMES = ("reference_image", "mode")
+    RETURN_TYPES = ("IMAGE", "COMBO", FILL_VALUES)
+    RETURN_NAMES = ("reference_image", "mode", "fill_strategy")
     FUNCTION = "run"
     CATEGORY = CATEGORY + "/Reference"
 
@@ -546,11 +553,19 @@ class THSUniversalReferenceImage:
                         "tooltip": "Upload/select a single reference image. Leave __none__ while mode is without_reference.",
                     },
                 ),
-            }
+            },
+            "optional": {
+                "fill_strategy": (
+                    list(FILL_STRATEGIES),
+                    {"default": DEFAULT_FILL, "tooltip": "Подготовка маски для удаления и режима фото. «Без заливки» передаёт исходные пиксели и сохраняет фото как референс H3."},
+                ),
+            },
         }
 
     @classmethod
-    def VALIDATE_INPUTS(cls, mode=None, reference_image=None, **kwargs):
+    def VALIDATE_INPUTS(cls, mode=None, reference_image=None, fill_strategy=DEFAULT_FILL, **kwargs):
+        if fill_strategy not in FILL_STRATEGIES:
+            return "Неизвестный способ заполнения перед H3."
         try:
             mode_value = _normalise_reference_mode(mode)
         except ValueError as exc:
@@ -573,7 +588,7 @@ class THSUniversalReferenceImage:
         return True
 
     @classmethod
-    def IS_CHANGED(cls, mode="without_reference", reference_image=REFERENCE_NONE):
+    def IS_CHANGED(cls, mode="without_reference", reference_image=REFERENCE_NONE, fill_strategy=DEFAULT_FILL):
         """Invalidate Comfy's cache when the selected upload changes.
 
         OFF is a stable sentinel and deliberately performs no path lookup.  ON
@@ -607,11 +622,12 @@ class THSUniversalReferenceImage:
         except Exception:
             return f"with_reference:{value}"
 
-    def run(self, mode="without_reference", reference_image=REFERENCE_NONE):
+    def run(self, mode="without_reference", reference_image=REFERENCE_NONE, fill_strategy=DEFAULT_FILL):
         mode_value = _normalise_reference_mode(mode)
+        fill = FILL_STRATEGIES[fill_strategy]
         if mode_value == "without_reference":
             # Do not even import the Comfy image loader on the OFF path.
-            return (None, mode_value)
+            return (None, mode_value, fill)
         validation = self.VALIDATE_INPUTS(mode_value, reference_image)
         if validation is not True:
             raise ValueError(str(validation))
@@ -626,7 +642,7 @@ class THSUniversalReferenceImage:
         values = _node_result(result)
         if not values or values[0] is None:
             raise ValueError("reference image loader returned no image")
-        return (values[0], mode_value)
+        return (values[0], mode_value, fill)
 
 
 class THSUniversalH3ReferenceConditioning:
@@ -901,8 +917,8 @@ class THSUniversalH3PadSource:
                 "source_edit": ("STRING", {"forceInput": True}),
                 "replacement_image": ("IMAGE",),
                 "repair_mode": ("COMBO", {"forceInput": True}),
-                "fill_strategy": (["context", "neutral_gray"], {"default": "context",
-                    "tooltip": "Для удаления и замены с фото: окружение (Telea) или нейтральный серый #808080."}),
+                "fill_strategy": (FILL_VALUES, {"default": "context",
+                    "tooltip": "Подготовка для удаления и режима фото: окружение (Telea), нейтральный серый #808080 или исходные пиксели."}),
             },
         }
 
@@ -923,6 +939,8 @@ class THSUniversalH3PadSource:
         if repair_mode == "with_reference":
             preparation = "reference"
         elif repair_mode == "corrected_frame":
+            preparation = "keep"
+        if fill_strategy == "none" and preparation in ("clear", "reference"):
             preparation = "keep"
         model_source = images
         if preparation == "clear":

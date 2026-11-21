@@ -686,6 +686,16 @@ function createAutoPromptPreview(node, options = {}) {
 if (comfyApp?.registerExtension) {
     comfyApp.registerExtension({
         name: "UniversalInpaint.AutoPromptPreview",
+        beforeConfigureGraph(workflow) {
+            for (const node of workflow?.nodes || []) {
+                const values = node.widgets_values;
+                // Older saves stored the upload button's "image" sentinel in
+                // the slot now occupied by the fill selector.
+                if (node.type === "THSUniversalReferenceImage" && values?.length === 3 && values[2] === "image") {
+                    values.pop();
+                }
+            }
+        },
         async nodeCreated(node) {
             if (node.comfyClass === NODE_CLASS) createAutoPromptPreview(node);
         },

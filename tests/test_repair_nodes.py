@@ -176,12 +176,18 @@ def test_pad_without_audio_creates_silent_audio_contract():
     assert float(audio["waveform"].sum()) == 0.0
 
 
-@pytest.mark.parametrize("settings", [{"prefill": False}, {"prefill": True, "source_edit": "keep"}])
+@pytest.mark.parametrize("settings", [
+    {"prefill": False},
+    {"prefill": True, "source_edit": "keep"},
+    {"source_edit": "clear", "fill_strategy": "none"},
+    {"repair_mode": "with_reference", "fill_strategy": "none"},
+])
 def test_pad_node_can_keep_original_pixels_as_the_h3_source(monkeypatch, settings):
     def forbidden(*args):
         pytest.fail("replacement mode should keep the original pixel values")
 
     monkeypatch.setattr("ths_universal_inpaint.repair_nodes.telea_prefill_masked", forbidden)
+    monkeypatch.setattr("ths_universal_inpaint.repair_nodes.place_reference", forbidden)
     images = np.random.default_rng(42).random((6, 35, 33, 3), dtype=np.float32)
     mask = np.ones(images.shape[:3], dtype=np.float32)
     padded, padded_mask, _, original_count, padded_count = THSUniversalH3PadSource().run(images, mask, **settings)

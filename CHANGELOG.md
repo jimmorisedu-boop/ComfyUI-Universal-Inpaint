@@ -3,7 +3,7 @@
 ## Unreleased — V70 repair workbench
 
 - Route text, photo reference and corrected-frame edits through one V70 graph.
-- Offer context and neutral-gray preparation for supported edits. Preserve source shading for direct recolor commands.
+- Choose context, neutral gray or no fill next to the edit mode and image upload. No fill retains the original pixels and keeps native photo conditioning connected. Preserve source shading for direct recolor commands.
 - Document all three modes and the fill selector in the illustrated Russian guide.
 
 ### SAM3 point selection

@@ -2,7 +2,7 @@
   "id": "d021068d-52e1-5cd0-941a-7b08dd7ceb02",
   "revision": 1,
   "last_node_id": 105,
-  "last_link_id": 73,
+  "last_link_id": 74,
   "nodes": [
     {
       "id": 10,
@@ -177,7 +177,7 @@
       "type": "THSUniversalAutoPrompt",
       "pos": [
         1560,
-        252
+        276
       ],
       "size": [
         620,
@@ -297,6 +297,14 @@
           "type": "COMBO",
           "link": 72,
           "shape": 7
+        },
+        {
+          "name": "fill_strategy",
+          "type": "COMBO",
+          "link": 74,
+          "widget": {
+            "name": "fill_strategy"
+          }
         }
       ],
       "outputs": [
@@ -1330,7 +1338,7 @@
       "type": "THSUniversalPromptText",
       "pos": [
         1560,
-        806
+        828
       ],
       "size": [
         620,
@@ -1424,7 +1432,7 @@
       ],
       "size": [
         620,
-        150
+        180
       ],
       "flags": {
         "collapsed": false
@@ -1439,6 +1447,11 @@
         },
         {
           "name": "reference_image",
+          "type": "COMBO",
+          "link": null
+        },
+        {
+          "name": "fill_strategy",
           "type": "COMBO",
           "link": null
         }
@@ -1462,6 +1475,13 @@
             61,
             72
           ]
+        },
+        {
+          "name": "fill_strategy",
+          "type": "COMBO",
+          "links": [
+            74
+          ]
         }
       ],
       "properties": {
@@ -1469,9 +1489,10 @@
       },
       "widgets_values": [
         "without_reference",
-        "__none__"
+        "__none__",
+        "По окружению"
       ],
-      "title": "03a · Режим H3 и загрузка картинки"
+      "title": "03a · Режим правки, картинка и заливка"
     },
     {
       "id": 24,
@@ -2195,6 +2216,14 @@
       92,
       4,
       "STRING"
+    ],
+    [
+      74,
+      23,
+      2,
+      30,
+      6,
+      "COMBO"
     ]
   ],
   "groups": [
