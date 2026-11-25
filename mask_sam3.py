@@ -411,7 +411,7 @@ def _offload_model(model: Any) -> None:
         # to unload itself so Comfy's finalizer/bookkeeping stay in sync, then
         # remove only this SAM3 model from the active list.  Calling
         # ``unpatch_model`` directly would leave a stale LoadedModel pointing
-        # at zero loaded bytes and can confuse the next H3 eviction pass.
+        # at zero loaded bytes and can confuse the next Comfy eviction pass.
         loaded_models = getattr(model_management, "current_loaded_models", None)
         if isinstance(loaded_models, list):
             for index in range(len(loaded_models) - 1, -1, -1):

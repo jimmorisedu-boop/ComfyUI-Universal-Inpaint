@@ -234,3 +234,15 @@ def test_track_rejects_lost_object_identity_and_missing_requested_frames(monkeyp
             _doc(action="track", token=token, frame=0),
             tracking_mode="sam3", grow=0, feather=0,
         )
+
+
+def test_native_occlusion_is_a_computed_empty_frame():
+    shape = (20, 30)
+    empty = {"obj_ids": np.array([], dtype=int), "out_binary_masks": np.empty((0, *shape), bool)}
+    other = {"obj_ids": np.array([7]), "out_binary_masks": np.ones((1, *shape), bool)}
+    for response in (empty, other):
+        mask = video._tracked_response_mask(response, [1], shape)
+        assert mask.shape == shape and not mask.any()
+    assert video._tracked_response_mask(other, [1, 7], shape).all()
+    assert video._tracked_response_mask({"obj_ids": np.array([])}, [1], shape) is None
+    assert video._tracked_response_mask({**empty, "obj_ids": np.array([1])}, [1], shape) is None

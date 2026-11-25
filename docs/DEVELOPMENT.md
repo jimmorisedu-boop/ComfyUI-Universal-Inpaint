@@ -1,60 +1,24 @@
 # Development
 
-This repository is intentionally a direct ComfyUI custom-node checkout. Keep
-`__init__.py`, the Python node modules, and `web/` at the repository root.
-Moving them under a second `custom_nodes/` directory makes a clone silently
-fail to load in ComfyUI.
+This repository is a direct ComfyUI custom-node package for `THSUniversalMaskEditor`. Keep `__init__.py`, `mask_*.py`, and `web/` at the repository root so ComfyUI loads the extension directly without a nested folder wrapper.
 
 ## Local checks
-
-Use a normal Python environment for the CPU contract suite:
 
 ```powershell
 python -m pytest -q
 node --test tests/*.test.mjs
+npx -y modern-web-guidance@latest legacy-scan web
 ```
-
-The Python tests do not require a running ComfyUI server or GPU. One optional
-test may skip when torch is not installed. The JavaScript tests use small DOM
-fakes and do not submit jobs.
 
 The direct-loader smoke test mirrors ComfyUI's custom-node import contract:
 
 ```powershell
-python -c "import importlib.util,sys; root='.'; spec=importlib.util.spec_from_file_location('universal_inpaint_node','__init__.py',submodule_search_locations=[root]); module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module; spec.loader.exec_module(module); assert module.NODE_CLASS_MAPPINGS and module.WEB_DIRECTORY == './web'; print('node import: PASS')"
+python -c "import importlib.util,sys; root='.'; spec=importlib.util.spec_from_file_location('ths_universal_inpaint','__init__.py',submodule_search_locations=[root]); module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module; spec.loader.exec_module(module); assert 'THSUniversalMaskEditor' in module.NODE_CLASS_MAPPINGS and module.WEB_DIRECTORY == './web'; print('node import: PASS')"
 ```
 
-## Graph and UI contracts
+## Contracts
 
-- Keep the `THS*` node class IDs stable; existing saved graphs depend on them.
-- Keep `WEB_DIRECTORY = "./web"` and serve the current editor from the root
-  `web/` directory.
-- Preserve source/mask geometry and exact outside-mask compositing contracts.
-- SAM3 remains two-step (frame seed, then range tracking). Do not add an
-  implicit Optical Flow fallback to a native SAM3 error.
-- Point selection and positive/negative corrections automatically request only
-  a frame preview. Range tracking and H3 must still require separate clicks.
-  Preserve `sam3.prompt` through serialization/history; changing a point
-  invalidates the old frame proof. Brush corrections must not change the prompt.
-- `editor_request: sam3_frame_v1` belongs only to the scoped queue request.
-  Its response patches the selected mask and edit base over loaded source
-  frames. Track and the final graph use normal node outputs and verify the
-  seed against the canonical digest of the complete clip.
-- Keep mask-only workflows free of H3 model nodes so they work without H3.
-- New workflows must use placeholders, not personal media names, prompt text,
-  mask history, seed tokens, source fingerprints, host IDs or local paths.
-
-## Dependency boundaries
-
-ComfyUI core, H3/Video nodes, Florence-2, SAM3 and their checkpoints are
-external runtime components. Do not vendor model files or write downloaders in
-the node package. Model setup belongs in the separately maintained installer
-and model documentation (`scripts/setup.py`, `docs/INSTALL*.md`,
-`docs/MODELS.md`).
-
-## Pull requests
-
-Add focused tests for changes in the same pull request. Do not include source
-video, raw masks, prompts, debug logs containing media, model weights, machine
-paths or private acceptance evidence. See `CONTRIBUTING.md` for the review
-checklist.
+- Keep the `THSUniversalMaskEditor` class ID, `RETURN_TYPES = ("MASK", "IMAGE")`, and `WEB_DIRECTORY = "./web"` stable.
+- SAM3 stays strictly two-step (`action: "frame"` seed proof followed by explicit `action: "track"`). Never silently substitute Optical Flow on a native SAM3 error.
+- `editor_request: "sam3_frame_v1"` is transient to scoped single-frame preview prompts and must never be persisted into workflow `mask_data`.
+- Workflow files in `workflows/` must contain portable placeholders (`REPLACE_WITH_INPUT_VIDEO.mp4`), not local paths, source fingerprints, or private media.

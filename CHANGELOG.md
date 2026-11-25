@@ -1,55 +1,25 @@
 # Changelog
 
-## Unreleased — V70 repair workbench
+## 0.2.0 — Standalone Video Mask Editor & Hover-Only Zero-Shift UI
 
-- Route text, photo reference and corrected-frame edits through one V70 graph.
-- Choose context, neutral gray or no fill next to the edit mode and image upload. No fill retains the original pixels and keeps native photo conditioning connected. Preserve source shading for direct recolor commands.
-- Document all three modes and the fill selector in the illustrated Russian guide.
+- Scoped the repository and ComfyUI package exclusively to `THSUniversalMaskEditor` (`Video Mask Editor`).
+- Added the **Bezier Pen tool (`Перо`)**: sharp corner clicks, symmetric cubic Bezier handle dragging, live rubber-band curve and anchor/handle preview, snap-to-close on anchor 0, `Backspace`/`Delete` undo-anchor, `Enter`/double-click completion, and lossless serialization into normalized mask polygons.
+- Upgraded UI interactions to **hover-only Top-Layer tooltips** (`popover="hint"`, `650ms` initial hover delay / `180ms` warm transition) with `@supports (position-area: block-start)` placement, `@supports (container-type: anchored)` directional arrows, `.ths-tip-wrap` coverage for disabled action buttons, and header/section info triggers (`?` and `ⓘ`).
+- Removed permanent inline hint banners, mode helper paragraphs, queue captions, and `<details>` accordions from normal layout flow and stabilized segmented controls, tool rails, inspector scrollbars (`scrollbar-gutter: stable`), and numeric readouts (`tabular-nums`) for `0px` layout shift across tool/tab switches and hovers.
+- Upgraded core web architecture (`web/universal_mask_editor.js`) with CSS Anchor Positioning pill/rail indicators, IME-safe `Enter` handling, native `<dialog>` top-layer transitions, ARIA toolbars (`focusgroup` + roving tabindex), native range custom properties, `@container` responsive stacking, and `content-visibility: auto` offscreen playback pausing.
+- Shipped clean standalone mask workflow [`workflows/Universal_Video_Mask_Editor.json`](workflows/Universal_Video_Mask_Editor.json).
 
-### SAM3 point selection
+### SAM3 multi-object point & box segmentation
 
-- Click an object for a single-frame SAM3 preview, with positive and negative
-  point tools for refinement. Video tracking and H3 remain explicit actions.
-- Reuse the loaded source frames on each SAM3 preview. The scoped queue job
-  returns the selected frame's mask and brush baseline, and ComfyUI manages
-  reuse and eviction of the SAM3 model between clicks.
-- Keep point prompts through saving and history, show their markers on the
-  frame, and retain brush corrections when selecting again or tracking.
-- Copying manual corrections retains the original verified point seed.
-- Added point interaction regression coverage and real-video acceptance notes.
+- Explicit two-step execution: click objects on a seed frame (up to 8 independent objects), refine with positive (`+`) / negative (`−`) points or right-click point/object removal, then run explicit range/direction tracking (`forward`, `backward`, `both`).
+- Persistent manual brush/eraser/pen/rect overrides cleanly layered on top of SAM3, Optical Flow, Keyframes, or Static masks.
 
 ## 0.1.2 — SAM3 undo/redo readiness
 
-- Fixed undo/redo of brush corrections unnecessarily discarding the approved
-  SAM3 seed and disabling Track video. A verified seed is retained only when
-  the source, seed frame and object prompt still match.
-- Historical client tokens no longer replace the live verified backend token.
-  Changing or clearing the object prompt still requires a new frame calculation.
-- Added regression coverage for correction history, historical token promotion
-  and refusing to resurrect revoked seed readiness.
+- Fixed undo/redo of brush corrections unnecessarily discarding the approved SAM3 seed and disabling `Track video`.
+- Prevented historical client tokens from replacing the verified backend seed token.
 
-## 0.1.1 — mask editor layout
+## 0.1.1 — Mask editor layout
 
-- Grouped selection, mask settings, tracking range and frame edits in a side
-  inspector, with calculation actions fixed below its scrollable settings.
-- Placed drawing tools beside the frame, view controls above it, and video
-  navigation below it. Inline and fullscreen editing share the same layout.
-- Kept ComfyUI theme colors, all mask modes, Grow/Feather and the separate
-  SAM3 frame-calculation and video-tracking steps.
-- Added component-width responsive layout and a visible next calculation action.
-- Verified brush/cursor alignment after fullscreen at scaled node size, wheel
-  zoom, middle-button panning, navigation and edit persistence in Chrome using
-  real local video frames. No new SAM3 inference or H3 render is claimed.
-- Updated the Russian user guide and documented the layout decisions.
-
-## 0.1.0 — initial public checkout
-
-- Published the direct ComfyUI custom-node layout for Universal Inpaint.
-- Included the current mask editor with distinct Optical Flow and two-step
-  native SAM3 paths.
-- Included mask-only, manual H3, AutoPrompt, reference/corrected-frame and
-  Repair Workbench workflows with portable placeholders.
-- Added CPU Python contracts, frontend MJS suites, direct-loader smoke guidance
-  and CI configuration.
-- Excluded private media, acceptance captures, host paths, model weights and
-  deployment/installer internals.
+- Grouped selection, mask settings, tracking range, and frame edits in a side inspector, with calculation actions pinned below the scrollable settings area.
+- Shared one live workbench DOM tree between inline and fullscreen modal views.

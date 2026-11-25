@@ -37,7 +37,7 @@ import urllib.parse
 import urllib.request
 
 
-VERSION = "0.1.2"
+VERSION = "0.2.0"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEPENDENCIES_PATH = REPO_ROOT / "config" / "dependencies.json"
 MODELS_PATH = REPO_ROOT / "config" / "models.json"
@@ -841,8 +841,8 @@ def _download_one(root: Path, cache_root: Path, model: Mapping[str, Any], *, all
     expected_size = model.get("size_bytes")
     expected_sha = model.get("sha256")
     # A complete, verified cache is reusable without a second network request.
-    # This is important for multi-file Florence bundles and for interrupted
-    # large H3 downloads resumed by a later invocation.
+    # This is important for interrupted large downloads resumed by a later
+    # invocation.
     if cache.is_file() and expected_size is not None and cache.stat().st_size == int(expected_size):
         cached_sha = _sha256(cache)
         if not expected_sha or cached_sha.lower() == str(expected_sha).lower():
@@ -966,13 +966,9 @@ def check_runtime(*, comfy_root: Path | None, python: Path | None, profiles: Seq
         version_tuple = (0, 0, 0)
     result["python_version_tuple"] = version_tuple
     result["python_supported"] = version_tuple >= (3, 10, 0)
-    core_h3 = root / "comfy_extras" / "nodes_minimax_h3.py"
-    result["native_h3_module"] = {"path": str(core_h3), "present": core_h3.is_file()}
     required_modules = {
         "editor": ("numpy", "PIL", "cv2"),
         "sam3": ("torch", "numpy", "PIL", "cv2"),
-        "autoprompt": ("torch", "transformers", "PIL"),
-        "h3": ("torch", "torchaudio", "av"),
     }
     modules: dict[str, bool] = {}
     for profile in profiles:
@@ -986,9 +982,6 @@ def check_runtime(*, comfy_root: Path | None, python: Path | None, profiles: Seq
         sam3_root = root / "custom_nodes" / "comfyui-sam3"
         sam3_files = [sam3_root / "nodes" / "_model_cache.py", sam3_root / "nodes" / "sam3_model_patcher.py"]
         custom_node_checks["sam3"] = {"path": str(sam3_root), "present": sam3_root.is_dir(), "native_files": all(path.is_file() for path in sam3_files)}
-    if "autoprompt" in profiles:
-        florence_root = root / "custom_nodes" / "comfyui-florence2"
-        custom_node_checks["autoprompt"] = {"path": str(florence_root), "present": florence_root.is_dir(), "nodes_py": (florence_root / "nodes.py").is_file()}
     result["custom_nodes"] = custom_node_checks
     missing_nodes = [name for name, record in custom_node_checks.items() if not all(bool(value) for key, value in record.items() if key not in {"path"})]
     result["missing_custom_nodes"] = missing_nodes
@@ -1020,7 +1013,6 @@ def check_runtime(*, comfy_root: Path | None, python: Path | None, profiles: Seq
         probe.returncode == 0
         and bool(result["python_supported"])
         and not missing_modules
-        and ("h3" not in profiles or bool(core_h3.is_file()))
         and not missing_nodes
         and not missing_models
     )
@@ -1032,7 +1024,7 @@ def _parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--comfy-root", type=Path, help="ComfyUI root (the directory containing main.py)")
     common.add_argument("--python", dest="python_path", type=Path, help="explicit Python interpreter")
-    common.add_argument("--profile", action="append", dest="profiles", help="profile: editor, sam3, autoprompt, h3 (repeatable)")
+    common.add_argument("--profile", action="append", dest="profiles", help="profile: editor, sam3 (repeatable)")
     common.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser = argparse.ArgumentParser(description=__doc__, parents=[common])
     parser.add_argument("--version", action="version", version=VERSION)

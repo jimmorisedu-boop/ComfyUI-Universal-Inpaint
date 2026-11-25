@@ -35,5 +35,5 @@ temp/
 *.pth
 *.ckpt
 
-# Screenshots prepared for the public V70 walkthrough.
-!docs/images/v70/*.png
+# Screenshots prepared for the Video Mask Editor documentation.
+!docs/images/*.png

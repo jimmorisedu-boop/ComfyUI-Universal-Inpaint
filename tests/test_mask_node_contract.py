@@ -119,6 +119,20 @@ def test_invalid_json_still_raises_instead_of_becoming_recovery_preview(monkeypa
     assert _ExecutionBlocker.calls == []
 
 
+def test_disabling_preview_output_still_prepares_editor_frames(monkeypatch):
+    _install_execution_blocker(monkeypatch)
+    monkeypatch.setattr(mask_nodes, "_torch_tensor", lambda x: x)
+    monkeypatch.setattr(mask_nodes, "_preview_tensor", lambda *_: pytest.fail("must not allocate RGB preview"))
+    result = THSUniversalMaskEditor().run(
+        np.zeros((2, 12, 16, 3), dtype=np.float32),
+        {"frames": {"0": {"events": [{"type": "rect", "x": .1, "y": .1, "w": .4, "h": .4}]}}},
+        tracking_mode="static", preview_output=False,
+    )
+    assert result["ui"]["universal_mask_frames"]
+    assert result["result"][0].any()
+    assert isinstance(result["result"][1], _ExecutionBlocker)
+
+
 def test_scoped_sam3_frame_returns_only_changed_masks_and_a_trackable_seed(monkeypatch):
     import base64
     import io

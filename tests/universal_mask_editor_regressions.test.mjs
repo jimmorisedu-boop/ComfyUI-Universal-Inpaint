@@ -146,15 +146,56 @@ editor.setFrame(1, { load: false });
 assert.ok(maskContext.draws.includes(editBaseImage), "undo reset restores inherited basis");
 editor.setFrame(0, { load: false });
 
-// Enter completes a polygon and only consumed keys stop propagation.
-button(editor.root, "Полигон").click();
+// Enter completes a straight Pen path and only consumed keys stop propagation.
+button(editor.root, "Перо").click();
+assert.equal(button(editor.root, "Полигон"), null, "Полигон button replaced by Перо");
 editor.canvas.dispatchEvent({ type: "pointerdown", button: 0, pointerId: 2, clientX: 120, clientY: 100, preventDefault() {} });
 editor.canvas.dispatchEvent({ type: "pointerdown", button: 0, pointerId: 3, clientX: 240, clientY: 100, preventDefault() {} });
 editor.canvas.dispatchEvent({ type: "pointerdown", button: 0, pointerId: 4, clientX: 180, clientY: 220, preventDefault() {} });
 let stopped = false;
 editor.root.dispatchEvent({ type: "keydown", key: "Enter", preventDefault() {}, stopPropagation() { stopped = true; } });
 assert.equal(editor.document.frames["0"].events.at(-1).type, "polygon");
+assert.equal(editor.document.frames["0"].events.at(-1).points.length, 3, "straight pen clicks keep exact corner vertices");
 assert.equal(stopped, true);
+
+// Dragging with the Pen pulls Bezier handles and produces a curved contour.
+const eventsBeforeBezier = editor.document.frames["0"].events.length;
+editor.canvas.dispatchEvent({ type: "pointerdown", button: 0, pointerId: 10, clientX: 140, clientY: 160, preventDefault() {} });
+editor.canvas.dispatchEvent({ type: "pointermove", button: 0, pointerId: 10, clientX: 140, clientY: 90, preventDefault() {} });
+editor.canvas.dispatchEvent({ type: "pointerup", button: 0, pointerId: 10, clientX: 140, clientY: 90 });
+editor.canvas.dispatchEvent({ type: "pointerdown", button: 0, pointerId: 11, clientX: 380, clientY: 160, preventDefault() {} });
+editor.canvas.dispatchEvent({ type: "pointermove", button: 0, pointerId: 11, clientX: 380, clientY: 230, preventDefault() {} });
+editor.canvas.dispatchEvent({ type: "pointerup", button: 0, pointerId: 11, clientX: 380, clientY: 230 });
+editor.root.dispatchEvent({ type: "keydown", key: "Enter", preventDefault() {}, stopPropagation() {} });
+assert.equal(editor.document.frames["0"].events.length, eventsBeforeBezier + 1);
+const bezierEvent = editor.document.frames["0"].events.at(-1);
+assert.equal(bezierEvent.type, "polygon");
+assert.ok(bezierEvent.points.length > 6, "curved Bezier segments subdivide smoothly");
+assert.ok(bezierEvent.points.every(([x, y]) => x >= 0 && x <= 1 && y >= 0 && y <= 1), "flattened Bezier coordinates stay normalized");
+
+// Clicking near the first Pen anchor closes the path automatically; Backspace and Escape edit or abort open paths.
+const eventsBeforeClose = editor.document.frames["0"].events.length;
+editor.canvas.dispatchEvent({ type: "pointerdown", button: 0, pointerId: 12, clientX: 160, clientY: 120, preventDefault() {} });
+editor.canvas.dispatchEvent({ type: "pointerup", button: 0, pointerId: 12, clientX: 160, clientY: 120 });
+editor.canvas.dispatchEvent({ type: "pointerdown", button: 0, pointerId: 13, clientX: 300, clientY: 120, preventDefault() {} });
+editor.canvas.dispatchEvent({ type: "pointerup", button: 0, pointerId: 13, clientX: 300, clientY: 120 });
+editor.canvas.dispatchEvent({ type: "pointerdown", button: 0, pointerId: 14, clientX: 230, clientY: 220, preventDefault() {} });
+editor.canvas.dispatchEvent({ type: "pointerup", button: 0, pointerId: 14, clientX: 230, clientY: 220 });
+editor.canvas.dispatchEvent({ type: "pointerdown", button: 0, pointerId: 15, clientX: 163, clientY: 123, preventDefault() {} });
+editor.canvas.dispatchEvent({ type: "pointerup", button: 0, pointerId: 15, clientX: 163, clientY: 123 });
+assert.equal(editor.document.frames["0"].events.length, eventsBeforeClose + 1, "clicking near first anchor closes path");
+assert.equal(editor.state.penPath.length, 0);
+
+editor.canvas.dispatchEvent({ type: "pointerdown", button: 0, pointerId: 16, clientX: 180, clientY: 140, preventDefault() {} });
+editor.canvas.dispatchEvent({ type: "pointerup", button: 0, pointerId: 16, clientX: 180, clientY: 140 });
+editor.canvas.dispatchEvent({ type: "pointerdown", button: 0, pointerId: 17, clientX: 240, clientY: 180, preventDefault() {} });
+editor.canvas.dispatchEvent({ type: "pointerup", button: 0, pointerId: 17, clientX: 240, clientY: 180 });
+assert.equal(editor.state.penPath.length, 2);
+editor.root.dispatchEvent({ type: "keydown", key: "Backspace", preventDefault() {}, stopPropagation() {} });
+assert.equal(editor.state.penPath.length, 1, "Backspace removes last Pen anchor");
+editor.root.dispatchEvent({ type: "keydown", key: "Escape", preventDefault() {}, stopPropagation() {} });
+assert.equal(editor.state.penPath.length, 0, "Escape cancels open Pen path");
+assert.equal(editor.document.frames["0"].events.length, eventsBeforeClose + 1, "Escape does not commit open Pen path");
 
 // A visible tracking selector must undo/redo the actual serialized mode too.
 const trackingSelect = find(editor.root, (node) => node.tagName === "SELECT" && node.attributes["aria-label"] === "Трекинг");
@@ -277,6 +318,96 @@ assert.doesNotMatch(configuredEditor.status.textContent, /SAM3/);
 configuredTracking.value = "sam3"; configuredTracking.dispatchEvent({ type: "change" });
 assert.equal(configuredEditor.state.mode, "sam_point");
 assert.match(configuredEditor.status.textContent, /общей маске/);
+
+// Modern-web-guidance & zero-H3 UI checks.
+const allButtons = [];
+(function walkUi(item) {
+    if (!item) return;
+    if (item.tagName === "BUTTON") allButtons.push(item);
+    for (const child of item.children || []) walkUi(child);
+})(configuredEditor.root);
+assert.equal(allButtons.some((item) => /h3/i.test(`${item.textContent} ${item.attributes?.["aria-label"] || ""} ${item.title || ""}`)), false, "no button exposes H3 labels");
+assert.ok(button(configuredEditor.root, "Запустить граф"), "queue button uses generic graph label");
+
+const toolToolbar = find(configuredEditor.root, (item) => item.className === "ths-mask-tools");
+assert.equal(toolToolbar.attributes.role, "toolbar");
+assert.equal(toolToolbar.attributes["aria-orientation"], "vertical");
+assert.equal(toolToolbar.attributes.focusgroup, "toolbar wrap block");
+assert.ok(find(toolToolbar, (item) => item.attributes?.role === "separator"));
+assert.equal(button(toolToolbar, "Отменить").attributes["aria-pressed"], undefined, "action buttons omit aria-pressed");
+assert.equal(button(toolToolbar, "Кисть").attributes["aria-pressed"], "false");
+assert.equal(button(toolToolbar, "Перо").attributes["aria-pressed"], "false");
+assert.equal(button(toolToolbar, "Полигон"), null);
+const verticalButtons = [button(toolToolbar, "Выбрать объект"), button(toolToolbar, "Добавить к объекту"), button(toolToolbar, "Исключить из объекта"), button(toolToolbar, "Кисть")];
+assert.equal(verticalButtons.filter((item) => item.tabIndex === 0).length, 1, "roving tabindex keeps one stop in tab order");
+let arrowDownFocused = false;
+let arrowUpFocused = false;
+verticalButtons[1].focus = () => { arrowDownFocused = true; };
+verticalButtons[0].focus = () => { arrowUpFocused = true; };
+toolToolbar.dispatchEvent({ type: "keydown", key: "ArrowDown", target: verticalButtons[0], preventDefault() {}, stopPropagation() {} });
+assert.equal(arrowDownFocused, true);
+assert.equal(verticalButtons[1].tabIndex, 0);
+assert.equal(verticalButtons[0].tabIndex, -1);
+toolToolbar.dispatchEvent({ type: "keydown", key: "ArrowUp", target: verticalButtons[1], preventDefault() {}, stopPropagation() {} });
+assert.equal(arrowUpFocused, true);
+assert.equal(verticalButtons[0].tabIndex, 0);
+assert.equal(verticalButtons[1].tabIndex, -1);
+
+// IME composing guards prevent premature Enter submission on numeric inputs.
+const directFrameInput = find(configuredEditor.root, (item) => item.tagName === "INPUT" && item.attributes?.["aria-label"] === "Номер кадра");
+configuredEditor.state.frameCount = 5;
+configuredEditor.setFrame(0, { load: false });
+directFrameInput.value = "4";
+directFrameInput.dispatchEvent({ type: "keydown", key: "Enter", isComposing: true, preventDefault() {}, stopPropagation() {} });
+assert.equal(configuredEditor.state.frame, 0, "isComposing ignores Enter");
+directFrameInput.dispatchEvent({ type: "keydown", key: "Enter", keyCode: 229, isComposing: false, preventDefault() {}, stopPropagation() {} });
+assert.equal(configuredEditor.state.frame, 0, "keyCode 229 fallback ignores Enter");
+directFrameInput.dispatchEvent({ type: "keydown", key: "Enter", keyCode: 13, isComposing: false, preventDefault() {}, stopPropagation() {} });
+assert.equal(configuredEditor.state.frame, 3, "non-composing Enter commits frame");
+
+const sam3Dialog = find(configuredEditor.root, (item) => item.tagName === "DIALOG");
+const sam3DialogTitle = find(sam3Dialog, (item) => item.tagName === "STRONG");
+assert.equal(sam3Dialog.attributes["aria-labelledby"], sam3DialogTitle.id);
+assert.equal(sam3Dialog.attributes.closedby, "closerequest");
+assert.ok(configuredEditor.root.attributes["data-instance"]);
+const frameRange = find(configuredEditor.root, (item) => item.tagName === "INPUT" && item.attributes?.type === "range" || item.type === "range");
+assert.match(frameRange.attributes["aria-valuetext"], /Кадр|%|px/);
+
+// Hover-only tooltips & layout declutter checks: no permanent inline hint blocks.
+assert.equal(find(configuredEditor.root, (item) => item.tagName === "DETAILS"), null, "permanent details accordion removed");
+const visibleModeCopy = find(configuredEditor.root, (item) => String(item.className || "").includes("ths-mask-section-copy"));
+assert.ok(String(visibleModeCopy.className).includes("ths-sr-only"), "mode hint is visually hidden outside layout flow");
+const hiddenQueueHint = find(configuredEditor.root, (item) => String(item.className || "").includes("ths-mask-queue-hint"));
+assert.ok(String(hiddenQueueHint.className).includes("ths-sr-only"), "queue hint is visually hidden outside layout flow");
+assert.ok(String(configuredEditor.status.className).includes("ths-sr-only"), "status live region preserves textContent outside layout flow");
+assert.ok(button(configuredEditor.root, "Управление и горячие клавиши"), "header help button exposes keyboard tips");
+assert.ok(button(configuredEditor.root, "О режиме выделения"), "selection info button exposes mode hint");
+
+const sharedTooltip = find(configuredEditor.root, (item) => item.attributes?.role === "tooltip" && item.className === "ths-mask-tooltip");
+assert.ok(sharedTooltip, "shared hover tooltip element exists");
+assert.ok(["hint", "auto"].includes(sharedTooltip.attributes.popover));
+const tooltipBody = find(sharedTooltip, (item) => item.className === "ths-mask-tooltip-body");
+
+const penBtn = button(toolToolbar, "Перо");
+configuredEditor.root.dispatchEvent({ type: "focusin", target: penBtn });
+assert.equal(sharedTooltip.attributes["data-open"], "true", "focusing trigger opens Top-Layer tooltip");
+assert.match(tooltipBody.textContent, /кривая Безье/);
+assert.equal(penBtn.attributes["aria-describedby"], sharedTooltip.id);
+assert.equal(penBtn.title, "", "native title suppressed while custom tooltip is active");
+configuredEditor.root.dispatchEvent({ type: "keydown", key: "Escape", preventDefault() {}, stopPropagation() {} });
+assert.equal(sharedTooltip.attributes["data-open"], undefined, "Escape closes open tooltip first");
+assert.match(penBtn.title, /кривая Безье/, "native title restored when tooltip closes");
+
+const queueBtn = button(configuredEditor.root, "Запустить граф");
+const queueWrap = find(configuredEditor.root, (item) => item.className === "ths-tip-wrap" && item.children.includes(queueBtn));
+assert.ok(queueWrap, "queue action button wrapped so disabled hover still shows tooltip");
+configuredEditor.root.dispatchEvent({ type: "pointerover", target: queueWrap });
+await new Promise((resolve) => setTimeout(resolve, 250));
+assert.equal(sharedTooltip.attributes["data-open"], undefined, "tooltip waits past brief pointer pass before opening");
+await new Promise((resolve) => setTimeout(resolve, 460));
+assert.equal(sharedTooltip.attributes["data-open"], "true");
+assert.match(tooltipBody.textContent, /Сначала рассчитайте кадр SAM3/);
+
 configuredEditor.destroy();
 
 console.log("universal_mask_editor_regressions: PASS");

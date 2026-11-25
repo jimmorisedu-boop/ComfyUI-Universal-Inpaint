@@ -87,7 +87,7 @@ button(editor.root, "Выбрать объект").click();
 click(160,90);await tick();
 assert.deepEqual(editor.document.sam3.prompt, {frame:0,points:[[.25,.25]],labels:[1]});
 assert.deepEqual(JSON.parse(widgets[0].value).sam3.prompt, editor.document.sam3.prompt, "point survives serialization");
-assert.equal(submitted.length,1);assert.equal(submitted[0].output["99"],undefined,"click never queues H3");
+assert.equal(submitted.length,1);assert.equal(submitted[0].output["99"],undefined,"click never queues downstream graph");
 assert.equal(JSON.parse(submitted[0].output["7"].inputs.mask_data).editor_request,"sam3_frame_v1");
 assert.equal(JSON.parse(widgets[0].value).editor_request,undefined,"the scoped preview flag must never enter the workflow");
 assert.equal(editor.state.pendingPreview.sam3Action,"frame");
@@ -107,7 +107,7 @@ assert.deepEqual(editor.state.frameItems.get(1), { source: "existing-next-frame.
 assert.equal((await editor.applyExecuted({ universal_mask_frame_patch: [patch] })).stale,true,"a patch without an active request is ignored");
 sourceFrame();
 assert.equal(button(editor.root,"Отследить видео").disabled,false);
-assert.equal(button(editor.root,"Запустить H3").disabled,true);
+assert.equal(button(editor.root,"Запустить граф").disabled,true);
 assert.equal(submitted.length,1,"preview result never starts tracking automatically");
 button(editor.root,"Добавить к объекту").click();click(200,100);await tick();
 assert.deepEqual(editor.document.sam3.prompt.labels,[1,1]);
@@ -122,7 +122,7 @@ assert.deepEqual(JSON.parse(widgets[0].value).sam3.prompt,pointDocument.sam3.pro
 assert.equal(submitted.at(-1).output["99"],undefined);
 assert.equal(JSON.parse(submitted.at(-1).output["7"].inputs.mask_data || "{}").editor_request,undefined);
 await ready("point-seed-3",true);
-assert.equal(button(editor.root,"Запустить H3").disabled,false);
+assert.equal(button(editor.root,"Запустить граф").disabled,false);
 sourceFrame(1);
 assert.equal(button(editor.root,"Скопировать предыдущий ключ").disabled,true,"a point seed alone is not a copyable manual edit");
 button(editor.root,"Кисть").click();click(220,120);await tick();
@@ -144,7 +144,7 @@ assert.deepEqual(group[0],pointDocument.sam3.prompt);
 assert.deepEqual(group[1].points,[[.625,.5]]);
 assert.equal(control(editor.root,"Активный объект SAM3").value,"1");
 assert.equal(JSON.stringify(editor.document.frames[1]),stroke,"reselection retains manual corrections");
-assert.equal(button(editor.root,"Запустить H3").disabled,true);
+assert.equal(button(editor.root,"Запустить граф").disabled,true);
 const pendingId=editor.state.pendingPreview.promptId;
 const stale=await editor.applyExecuted({
     prompt_id:"old-point-request", universal_mask_frame_patch:[patch],

@@ -7,7 +7,7 @@ keeps all native ComfyUI imports lazy so CPU tests can exercise the contract
 without importing torch or starting a model.
 
 No optical-flow fallback is present here.  A native failure is surfaced as a
-typed ``SAM3VideoError`` and callers must block downstream H3 execution.
+typed ``SAM3VideoError`` and callers must block downstream execution.
 """
 
 from __future__ import annotations
@@ -489,6 +489,29 @@ def _select_object_mask(outputs: Mapping[str, Any], object_id: int, shape: tuple
     return np.asarray(selected > 0.0, dtype=bool)
 
 
+def _tracked_response_mask(outputs, object_ids, shape):
+    native_ids = outputs.get("obj_ids", outputs.get("out_obj_ids"))
+    if len(object_ids) > 1 and native_ids is None:
+        raise SAM3VideoError("SAM3 multi-object propagation did not report object IDs")
+    combined = None
+    for object_id in object_ids:
+        selected = _select_object_mask(outputs, object_id, shape)
+        if selected is not None:
+            combined = selected if combined is None else combined | selected
+    if combined is not None:
+        return combined
+
+    # Native SAM3 removes empty masks and their IDs together on occluded frames.
+    # A valid response for such a frame is different from a missing response.
+    payload = outputs.get("out_binary_masks")
+    if native_ids is not None and payload is not None:
+        ids = _as_numpy(native_ids).reshape(-1)
+        masks = _as_numpy(payload)
+        if masks.ndim == 3 and len(masks) == len(ids) and not np.isin(ids, object_ids).any():
+            return np.zeros(shape, dtype=bool)
+    return None
+
+
 def _native_track(
     images: np.ndarray,
     prompts: list[dict[str, Any]],
@@ -606,6 +629,8 @@ def _native_track(
             report = frame_progress("sam3_track", progress_end - progress_start + 1)
             completed = {int(seed.frame)}
             report(len(completed))
+            object_ids = [object_id for object_id, _ in seeds]
+            shape = tuple(int(v) for v in images.shape[1:3])
             for request_direction, span in spans:
                 _throw_interrupted()
                 request = {
@@ -623,14 +648,7 @@ def _native_track(
                     outputs = response.get("outputs", response)
                     if not isinstance(outputs, Mapping):
                         continue
-                    if len(seeds) > 1 and outputs.get("obj_ids", outputs.get("out_obj_ids")) is None:
-                        raise SAM3VideoError("SAM3 multi-object propagation did not report object IDs")
-                    shape = tuple(int(v) for v in images.shape[1:3])
-                    combined = None
-                    for object_id, _ in seeds:
-                        selected = _select_object_mask(outputs, object_id, shape)
-                        if selected is not None:
-                            combined = selected if combined is None else combined | selected
+                    combined = _tracked_response_mask(outputs, object_ids, shape)
                     if combined is not None:
                         index = int(frame_idx)
                         masks[index] = combined

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-import types
 from pathlib import Path
 
 import numpy as np
@@ -10,14 +9,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from ths_universal_inpaint import auto_prompt_nodes as apn  # noqa: E402
 from ths_universal_inpaint import mask_core  # noqa: E402
-from ths_universal_inpaint.repair_nodes import (  # noqa: E402
-    THSUniversalH3PadAudio,
-    THSUniversalPromptText,
-    THSUniversalRepairCompare,
-    pad_source_inputs,
-)
 
 
 def _clip(frames: int = 5, height: int = 32, width: int = 40) -> np.ndarray:
@@ -101,7 +93,6 @@ def test_raw_tracking_cache_invalidates_source_document_mode_and_range(monkeypat
     # invoke optical flow; this keeps the mode deterministic and avoids
     # silently selecting a different tracker backend.
     assert len(calls) == after_document
-    after_mode = len(calls)
     misses_before_range = mask_core.raw_tracking_cache_info()["misses"]
     run(images, _document(), start=1, end=3)
     assert mask_core.raw_tracking_cache_info()["misses"] > misses_before_range
@@ -121,52 +112,3 @@ def test_raw_tracking_cache_is_bounded_and_oversized_items_bypass(monkeypatch):
     info = mask_core.raw_tracking_cache_info()
     assert info["entries"] == 0
     assert info["bypasses"] >= 1
-
-
-def test_pad_audio_matches_existing_pad_source_waveform_bit_for_bit():
-    images = np.arange(6 * 4 * 4 * 3, dtype=np.float32).reshape(6, 4, 4, 3)
-    mask = np.zeros((6, 4, 4), dtype=np.float32)
-    waveform = np.arange(2 * 31, dtype=np.float32).reshape(2, 31)
-    audio = {"waveform": waveform, "sample_rate": 24}
-    expected = pad_source_inputs(images, mask, audio, model_fps=24, modulo=17, remainder=5)
-    actual = THSUniversalH3PadAudio().run(
-        images, audio=audio, model_fps=24, modulo=17, remainder=5, silence_sample_rate=48_000
-    )
-    np.testing.assert_array_equal(actual[0]["waveform"], expected[2]["waveform"])
-    assert actual[0]["sample_rate"] == expected[2]["sample_rate"]
-    assert actual[1:] == expected[3:]
-
-    silent_expected = pad_source_inputs(images, mask, None, model_fps=24, modulo=17, remainder=5)[2]
-    silent_actual = THSUniversalH3PadAudio().run(images, model_fps=24, modulo=17, remainder=5)[0]
-    np.testing.assert_array_equal(silent_actual["waveform"], silent_expected["waveform"])
-
-
-def test_manual_autoprompt_skips_context_prepare_and_disabled_preview_is_tiny(monkeypatch):
-    images = np.zeros((3, 32, 32, 3), dtype=np.float32)
-    mask = np.zeros((3, 32, 32), dtype=np.float32)
-    mask[:, 8:16, 8:16] = 1.0
-    monkeypatch.setattr(apn, "prepare_caption_inputs", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("manual mode must skip context preparation")))
-    monkeypatch.setattr(apn, "_preview_tensor", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("disabled preview must not allocate overlay")))
-    result = apn.THSUniversalAutoPrompt().run(
-        images, mask, mode="manual", manual_prompt="keep this exact text", preview_enabled=False
-    )
-    assert result["result"][2].shape[0:3] == (1, 1, 1)
-    assert "keep this exact text" in result["result"][0]
-
-
-def test_prompt_text_roundtrips_multiline_exactly():
-    text = "line one\n  line two\n\nline four"
-    assert THSUniversalPromptText().run(text) == (text,)
-    assert THSUniversalPromptText.RETURN_TYPES == ("STRING",)
-
-
-def test_repair_compare_uses_bounded_temp_descriptors(monkeypatch, tmp_path):
-    monkeypatch.setitem(sys.modules, "folder_paths", types.SimpleNamespace(get_temp_directory=lambda: str(tmp_path)))
-    source = np.zeros((3, 8, 10, 3), dtype=np.float32)
-    result = np.ones_like(source)
-    payload = THSUniversalRepairCompare().run(source, result, fps=24)
-    frames = payload["ui"]["universal_repair_compare_frames"]
-    assert [item["frame"] for item in frames] == [0, 1, 2]
-    assert all("data_url" not in item and "original" in item and "result" in item for item in frames)
-    assert all((tmp_path / item["original"]["subfolder"] / item["original"]["filename"]).is_file() for item in frames)
-    assert payload["result"] == ()

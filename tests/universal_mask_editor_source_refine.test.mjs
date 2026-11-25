@@ -115,7 +115,7 @@ assert.ok(editor.debugReport().events.some((entry) => entry.event === "frame.rea
 assert.ok(editor.debugReport().events.some((entry) => entry.event === "preview.received" && entry.details.mismatch));
 assert.ok(!JSON.stringify(editor.debugReport()).includes("data:image"), "diagnostics never include image payloads");
 assert.equal(findButton(editor.root, "Начать маску для нового клипа").style.display, "inline-flex");
-assert.equal(findButton(editor.root, "Запустить H3").disabled, true);
+assert.equal(findButton(editor.root, "Запустить граф").disabled, true);
 
 findButton(editor.root, "Начать маску для нового клипа").click();
 assert.deepEqual(editor.document.frames, {});

@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest a portable improvement
+description: Suggest a portable improvement for Video Mask Editor (THSUniversalMaskEditor)
 title: "[feature] "
 labels: [enhancement]
 body:
@@ -10,7 +10,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: Universal Inpaint version/commit
+      label: Video Mask Editor version/commit
     validations:
       required: true
   - type: textarea

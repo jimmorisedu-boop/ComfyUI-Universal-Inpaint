@@ -1,46 +1,12 @@
-# Mask editor layout
+# Mask editor layout and web architecture
 
-The editor uses one live DOM tree in both the Comfy node and the native dialog.
-Only the workbench wrapper moves. The canvas, timeline, settings and calculation
-actions retain their relationships and event handlers across fullscreen cycles.
+The editor uses one live DOM tree shared across both the inline Comfy node widget and the native fullscreen `<dialog>`. Moving only the workbench wrapper retains all canvas bindings, frame caches, timeline controls, and undo history across inline/fullscreen toggles.
 
-The canvas and timeline occupy the main column. Drawing tools sit beside the
-canvas. The inspector groups selection, mask boundaries, brush controls and the
-tracking range. Its scrollable settings area is separate from the fixed action
-area, so calculation buttons remain visible on desktop. Below 760px of available
-component width, the inspector moves below the viewer and the dialog body scrolls.
+## Architecture & Modern Web Patterns
 
-## Design guidance used
-
-- **stageshow**, `references/craft.md`: “Simplify before polishing.” The design
-  removes the full-width strips of unrelated controls, uses consistent spacing
-  and keeps the actual video as the focal content. This is a functional editor,
-  so illustration-only skeletons, staged cursor animation and fake UI components
-  are not part of the implementation.
-- **modern-web-guidance / responsive-design**: “Use `@container` queries”. The
-  inline node and fullscreen dialog establish their own query containers. A node
-  resized inside a large Comfy viewport therefore still adapts to its own width.
-- **modern-web-guidance / dialog**: “Use the native `<dialog>` element”. The
-  existing modal retains `showModal()`, receives an accessible name and scopes
-  display styling to its open state. Scroll containment is on the modal/backdrop;
-  there is no global body overflow override to shift the graph on opening.
-- **modern-web-guidance / css**: “No global resets”. Layout and control rules
-  stay under the editor root and reuse ComfyUI theme variables. Rebuilt controls
-  use CSS classes instead of fixed inline geometry.
-
-## Verification
-
-- Existing eight frontend test suites pass, including SAM3 actions, mask
-  persistence, source recovery, navigation and diagnostics.
-- A real Chrome rendering check used frames from a local 119-frame portrait
-  video at 1920×900, 1366×768, 900×600 and 390×844, with no horizontal dialog
-  overflow or JavaScript errors.
-- Browser interaction checks covered wheel zoom, middle-button panning, exact
-  frame navigation, three fullscreen cycles retaining edits, and brush/cursor
-  alignment after returning to an inline node transformed to 75% scale.
-- These are editor acceptance checks. No new SAM3 inference or H3 render was
-  required for this layout change. Private frames and captures are not shipped.
-
-The subsequent [live ComfyUI verification](LIVE_VALIDATION.md) exercised real
-SAM3 and Optical Flow inference after this redesign and fixed SAM3 undo/redo
-readiness in version 0.1.2.
+- **Native `<dialog>` (`showModal()` + `aria-labelledby` + `closedby="closerequest"`)**: Top-layer modal entry/exit transitions use `@starting-style` and `transition-behavior: allow-discrete`, with scroll containment on `:modal` and `::backdrop` (`overscroll-behavior: contain`) and an explicit `data-closing` animation fallback where top-layer exit transitions are unsupported.
+- **Top-Layer hover-only tooltips (`popover="hint"`)**: One shared `.ths-mask-tooltip` (`role="tooltip"`) serves all buttons, wrappers, selects, and inputs with a deliberate `650ms` initial hover delay (`180ms` warm switch across adjacent triggers), temporary native `title` suppression to prevent double OS tooltips, keyboard-focus reveal (`focusin` guarded against click-focus noise), `Esc` dismissal, `.ths-tip-wrap` coverage over `:disabled` action buttons, `@supports (position-area: block-start)` + `@supports (container-type: anchored)` directional arrows (`@container anchored(fallback: ...)`), and a `getBoundingClientRect()` fallback where Anchor Positioning is unavailable. Canvas hover hints are disabled so painting never gets obstructed.
+- **Zero-shift ("non-jumping") layout stability**: Routine status hints live in a visually hidden `.ths-sr-only` ARIA live region (and on hover over the header indicator), mode/queue explanations move behind hover triggers (`ⓘ` / `.ths-tip-wrap`), warnings/recovery controls float inside `.ths-mask-alert-overlay` over the canvas without shifting surrounding tracks, segmented controls keep uniform `font-weight: 600`, `.ths-mask-tools` locks `46px` width, `.ths-mask-inspector-body` enables `scrollbar-gutter: stable`, and numeric readouts lock `tabular-nums` + `minWidth`.
+- **Bezier Pen vector tool (`Перо` / `flattenPenPath`)**: Supports corner clicks, symmetric cubic Bezier handle dragging (including outside frame bounds via `rawPointFromEvent`), live rubber-band curve & anchor/handle overlay (`drawPenOverlay`), snap-to-close detection on anchor 0 (`<= 10px` CSS), `Backspace`/`Delete` anchor pop, double-click deduplication, and `flattenPenPath` rasterization into normalized `{ type: "polygon", mode: "add", points }` events (`<= 4096` points) compatible with `mask_core.py`.
+- **ARIA toolbars & CSS Anchor Positioning**: Vertical drawing rail (`role="toolbar"`, `aria-orientation="vertical"`, `focusgroup="toolbar wrap block"`, gliding `::before` accent indicator) and horizontal segmented view/transport toolbars derive active state from `[aria-pressed="true"]` with roving-tabindex keyboard fallback when native `focusgroup` is absent.
+- **Native sliders, `@container` responsiveness & offscreen pause**: `<input type="range">` syncs `--control-value`/`aria-valuetext` across dark `color-scheme`/`accent-color`; `.ths-mask-editor` collapses smoothly below `760px` container width; playback pauses offscreen via `content-visibility: auto` / `contentvisibilityautostatechange` (with `IntersectionObserver` fallback); numeric inputs ignore IME composing `Enter`.

@@ -4,16 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comfyui-universal-inpaint"
-version = "0.1.2"
-description = "Portable ComfyUI nodes and workflows for user-masked video repair"
+version = "0.2.0"
+description = "ComfyUI interactive video object selection and mask tracking editor node (SAM3, Optical Flow, Keyframes, Static)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "GPL-3.0-only" }
 authors = [{ name = "jimmorisedu-boop" }]
 maintainers = [{ name = "jimmorisedu-boop" }]
-keywords = ["comfyui", "video", "inpainting", "mask", "sam3"]
+keywords = ["comfyui", "video", "mask", "mask-editor", "segmentation", "sam3", "optical-flow"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
@@ -35,15 +35,11 @@ Issues = "https://github.com/jimmorisedu-boop/ComfyUI-Universal-Inpaint/issues"
 include-package-data = true
 py-modules = [
   "__init__",
-  "auto_prompt_core",
-  "auto_prompt_nodes",
-  "corrected_frame_nodes",
   "mask_core",
   "mask_nodes",
   "mask_progress",
   "mask_sam3",
   "mask_sam3_video",
-  "repair_nodes",
 ]
 
 [tool.setuptools.data-files]

@@ -1,5 +1,5 @@
 {
-  "id": "V69-UNIVERSAL-MASKED-REPAIR-MASK-ONLY",
+  "id": "UNIVERSAL-VIDEO-MASK-EDITOR",
   "revision": 0,
   "last_node_id": 23,
   "last_link_id": 6,
@@ -96,18 +96,18 @@
         "Node name for S&R": "GetVideoComponents"
       },
       "widgets_values": [],
-      "title": "02 · Кадры + исходные FPS"
+      "title": "02 · Кадры и исходные FPS"
     },
     {
       "id": 20,
       "type": "THSUniversalMaskEditor",
       "pos": [
         80,
-        900
+        840
       ],
       "size": [
-        1200,
-        1050
+        1120,
+        960
       ],
       "flags": {
         "collapsed": false
@@ -151,25 +151,26 @@
       },
       "widgets_values": [
         "{}",
-        "optical_flow",
+        "sam3",
         8,
         4,
         0,
         -1,
-        24.0
+        24.0,
+        true
       ],
-      "title": "03 · РЕДАКТОР МАСКИ · сначала Queue Preview/Save"
+      "title": "03 · Редактор маски видео"
     },
     {
       "id": 21,
       "type": "MaskToImage",
       "pos": [
-        1320,
-        2050
+        1280,
+        840
       ],
       "size": [
-        520,
-        360
+        480,
+        240
       ],
       "flags": {
         "collapsed": false
@@ -196,18 +197,18 @@
         "Node name for S&R": "MaskToImage"
       },
       "widgets_values": [],
-      "title": "04 · Маска в PNG для проверки"
+      "title": "04 · Преобразовать маску в изображение"
     },
     {
       "id": 22,
       "type": "SaveImage",
       "pos": [
-        1900,
-        2050
+        1820,
+        840
       ],
       "size": [
-        460,
-        190
+        480,
+        320
       ],
       "flags": {
         "collapsed": false
@@ -226,20 +227,20 @@
         "Node name for S&R": "SaveImage"
       },
       "widgets_values": [
-        "masks/universal_inpaint_mask_output"
+        "masks/video_mask_output"
       ],
-      "title": "05 · Сохранить маску (опционально)"
+      "title": "05 · Сохранить маску"
     },
     {
       "id": 23,
       "type": "PreviewImage",
       "pos": [
-        1320,
-        2470
+        1280,
+        1240
       ],
       "size": [
-        520,
-        360
+        480,
+        420
       ],
       "flags": {
         "collapsed": false
@@ -258,7 +259,7 @@
         "Node name for S&R": "PreviewImage"
       },
       "widgets_values": [],
-      "title": "Preview · без H3 моделей"
+      "title": "06 · Предпросмотр выделения"
     }
   ],
   "links": [
@@ -314,12 +315,12 @@
   "groups": [
     {
       "id": 4600,
-      "title": "MASK ONLY · paint and save serialized editor state",
+      "title": "Выделение и экспорт маски видео",
       "bounding": [
         16,
         76,
-        2408,
-        2818
+        2348,
+        1788
       ],
       "color": "#35566b",
       "font_size": 24,
@@ -329,24 +330,15 @@
   "config": {},
   "extra": {
     "ths": {
-      "workflow_name": "Universal_Inpaint_Masked_Repair_MASK_ONLY",
-      "source_latent_inpaint": true,
+      "workflow_name": "Universal_Video_Mask_Editor",
       "user_mask_is_authoritative": true,
-      "exact_pixels_outside_mask": true,
-      "h3_internal_fps": 24.0,
-      "source_canvas_multiple": 32,
       "output_fps": "source video FPS",
-      "output_audio": "source video audio passthrough",
-      "denoise_default": 0.65,
-      "denoise_note": "adjustable starting point; not a quality promise",
-      "models": {},
-      "mask_tracking_is_approximate": false,
       "tracking_modes": [
         "sam3",
         "optical_flow",
+        "keyframes",
         "static"
-      ],
-      "h3_required": false
+      ]
     }
   },
   "version": 0.4

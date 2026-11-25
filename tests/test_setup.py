@@ -50,7 +50,7 @@ def test_install_plan_is_read_only_and_idempotent(tmp_path: Path) -> None:
     (source / "custom_nodes" / "ths_universal_inpaint" / "__init__.py").write_text("x=1\n", encoding="utf-8")
     (source / "requirements-editor.txt").write_text("numpy>=1.0\n", encoding="utf-8")
     (source / "workflows").mkdir()
-    (source / "workflows" / "V70_Universal_Repair_Workbench.json").write_text("{}\n", encoding="utf-8")
+    (source / "workflows" / "Universal_Video_Mask_Editor.json").write_text("{}\n", encoding="utf-8")
     deps = {
         "version": setup_tool.VERSION,
         "profiles": {"editor": {"requirements": ["requirements-editor.txt"], "custom_nodes": [], "workflows": []}},
@@ -153,7 +153,7 @@ def test_pip_report_rejects_gpu_stack_change_before_copy(tmp_path: Path, monkeyp
     assert not (root / "custom_nodes" / "ComfyUI-Universal-Inpaint").exists()
 
 
-def test_check_rejects_unsupported_python_and_missing_h3(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_check_rejects_unsupported_python_and_missing_sam3(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = _comfy(tmp_path)
     def fake_run(argv, **kwargs):
         values = [str(x) for x in argv]
@@ -161,7 +161,7 @@ def test_check_rejects_unsupported_python_and_missing_h3(tmp_path: Path, monkeyp
             return type("R", (), {"returncode": 0, "stdout": "3.9.18\n3.9.18", "stderr": ""})()
         return type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})()
     monkeypatch.setattr(setup_tool, "_run", fake_run)
-    result = setup_tool.check_runtime(comfy_root=root, python=Path(sys.executable), profiles=["h3"])
+    result = setup_tool.check_runtime(comfy_root=root, python=Path(sys.executable), profiles=["sam3"])
     assert result["python_supported"] is False
     assert result["status"] == "missing_capabilities"
 

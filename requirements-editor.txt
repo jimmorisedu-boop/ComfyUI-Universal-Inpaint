@@ -1,4 +1,4 @@
-# Universal Inpaint v0.1.0 — CPU/editor profile.
+# Video Mask Editor v0.2.0 — CPU/editor profile.
 # Installed by scripts/setup.py after a pip dry-run report proves that no
 # torch/CUDA package would change. ComfyUI's own environment remains the
 # authority for torch and any native video packages.

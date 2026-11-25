@@ -1061,20 +1061,21 @@ def postprocess_mask(mask: np.ndarray, grow: int = 0, feather: int = 0) -> np.nd
         raise MaskDataError("mask must have shape T x H x W")
     grow = int(max(0, min(256, grow)))
     feather = int(max(0, min(256, feather)))
-    result = np.clip(mask, 0.0, 1.0).copy()
+    result = np.empty_like(mask, order="C")
+    np.clip(mask, 0.0, 1.0, out=result)
     if cv2 is None:
         return result
+    kernel = None
     if grow:
         size = grow * 2 + 1
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
-        result = np.stack([cv2.dilate(frame, kernel) for frame in result], axis=0)
-    if feather:
-        size = feather * 2 + 1
-        result = np.stack([
-            cv2.GaussianBlur(frame, (size, size), sigmaX=max(0.1, feather / 2.0))
-            for frame in result
-        ], axis=0)
-    return np.clip(result, 0.0, 1.0).astype(np.float32)
+    size = feather * 2 + 1
+    for frame in result:
+        if kernel is not None:
+            cv2.dilate(frame, kernel, dst=frame)
+        if feather:
+            cv2.GaussianBlur(frame, (size, size), sigmaX=max(0.1, feather / 2.0), dst=frame)
+    return np.clip(result, 0.0, 1.0, out=result)
 
 
 def _frame_inherits(bucket: Mapping[str, Any]) -> bool:

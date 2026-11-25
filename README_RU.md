@@ -1,3 +1,3 @@
-# Universal Inpaint на русском
+# Video Mask Editor на русском
 
-[Главная страница на русском](README.md) · [Установка](docs/INSTALL_RU.md) · [Как пользоваться всеми нодами](docs/NODES_RU.md) · [Схема V70 со скриншотами](docs/USER_GUIDE_RU.md)
+[Главная страница на русском](README.md) · [Установка](docs/INSTALL_RU.md) · [Справочник ноды](docs/NODES_RU.md) · [Руководство со скриншотами](docs/USER_GUIDE_RU.md)

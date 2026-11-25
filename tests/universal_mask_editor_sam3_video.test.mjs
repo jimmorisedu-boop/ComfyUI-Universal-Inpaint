@@ -71,7 +71,7 @@ assert.equal(control(editor.root, "Направление").value, "both");
 assert.match(control(editor.root, "Grow").title, /Отследить видео/);
 assert.doesNotMatch(control(editor.root, "Grow").title, /Рассчитать маску/);
 assert.equal(button(editor.root, "Отследить видео").disabled, true, "tracking waits for frame result");
-assert.equal(button(editor.root, "Запустить H3").disabled, true, "H3 waits for full track");
+assert.equal(button(editor.root, "Запустить граф").disabled, true, "graph queue waits for full track");
 
 // Seed boxes are local; drawing never queues a request.
 button(editor.root, "Прямоугольник").click();
@@ -86,7 +86,7 @@ frameButton.click();
 await new Promise((resolve) => setImmediate(resolve));
 assert.equal(submitted.length, 1);
 const framePrompt = submitted.at(-1);
-assert.equal(framePrompt.output["99"], undefined, "frame preview has no H3 descendants");
+assert.equal(framePrompt.output["99"], undefined, "frame preview has no downstream descendants");
 assert.equal(JSON.parse(widgets[0].value).sam3.action, "frame");
 assert.equal(JSON.parse(widgets[0].value).sam3.seed_token, seedToken);
 const framePromptId = editor.state.pendingPreview.promptId;
@@ -96,7 +96,7 @@ assert.equal(editor.state.sam3.frameReady, true);
 assert.equal(editor.state.sam3.trackReady, false);
 assert.equal(editor.state.sam3.seedToken, backendToken, "backend token replaces the client placeholder");
 assert.equal(button(editor.root, "Отследить видео").disabled, false);
-assert.equal(button(editor.root, "Запустить H3").disabled, true);
+assert.equal(button(editor.root, "Запустить граф").disabled, true);
 
 // A targeted cancellation or unrelated track error keeps the approved frame
 // proof/token usable for a retry. It must not queue another request or invoke a
@@ -146,7 +146,7 @@ assert.equal(editor.state.sam3.frameSignature, approvedFrameSignature);
 assert.equal(editor.state.sam3.trackReady, false);
 assert.equal(overlay.style.display, "none", "interruption clears the overlay");
 assert.equal(button(editor.root, "Отследить видео").disabled, false, "track stays enabled after targeted cancellation");
-assert.equal(button(editor.root, "Запустить H3").disabled, true, "H3 stays disabled until a full track succeeds");
+assert.equal(button(editor.root, "Запустить граф").disabled, true, "queue stays disabled until a full track succeeds");
 
 button(editor.root, "Отследить видео").click();
 await new Promise((resolve) => setImmediate(resolve));
@@ -159,7 +159,7 @@ assert.equal(editor.state.sam3.frameReady, true);
 assert.equal(editor.state.sam3.frameSignature, approvedFrameSignature);
 assert.equal(editor.state.sam3.trackReady, false);
 assert.equal(button(editor.root, "Отследить видео").disabled, false, "track stays enabled after targeted error");
-assert.equal(button(editor.root, "Запустить H3").disabled, true);
+assert.equal(button(editor.root, "Запустить граф").disabled, true);
 
 const direction = control(editor.root, "Направление"); direction.value = "forward"; direction.dispatchEvent({ type: "change" });
 assert.equal(editor.state.sam3.frameReady, true, "direction does not invalidate the seed frame");
@@ -169,12 +169,12 @@ button(editor.root, "Отследить видео").click();
 await new Promise((resolve) => setImmediate(resolve));
 assert.equal(submitted.length, 4);
 const trackPrompt = submitted.at(-1);
-assert.equal(trackPrompt.output["99"], undefined, "track preview has no H3 descendants");
+assert.equal(trackPrompt.output["99"], undefined, "track preview has no downstream descendants");
 assert.equal(JSON.parse(widgets[0].value).sam3.action, "track");
 const trackPromptId = editor.state.pendingPreview.promptId;
 await editor.applyExecuted({ prompt_id: trackPromptId, universal_mask_meta: [{ source, has_mask: true, sam3: { frame_ready: true, track_ready: true, frame: 0, seed_token: backendToken, direction: "both", computed_frames: [0, 1, 2] } }], universal_mask_frames: [{ frame: 0, source: { data_url: "data:image/png;base64,source" }, mask: { data_url: "data:image/png;base64,mask" }, edit_base: { data_url: "data:image/png;base64,base" } }] });
 assert.equal(editor.state.sam3.trackReady, true);
-assert.equal(button(editor.root, "Запустить H3").disabled, false);
+assert.equal(button(editor.root, "Запустить граф").disabled, false);
 
 // A local correction is retained in mask_data but invalidates only the full track.
 editor.state.frameItems.set(1, { sourceImage: { naturalWidth: source.width, naturalHeight: source.height }, edit_base: { data_url: "base" } });
@@ -185,14 +185,14 @@ editor.canvas.dispatchEvent({ type: "pointerup", button: 0, pointerId: 2, client
 assert.ok(editor.document.frames["1"].events.some((event) => event.type === "stroke"));
 assert.equal(editor.state.sam3.frameReady, true);
 assert.equal(editor.state.sam3.trackReady, false);
-assert.equal(button(editor.root, "Запустить H3").disabled, true);
+assert.equal(button(editor.root, "Запустить граф").disabled, true);
 // Undo/redo of a correction must keep the approved object seed usable.
-// The full track still needs recalculation before H3 can run.
+// The full track still needs recalculation before the downstream graph can run.
 const correctedFrames = JSON.stringify(editor.document.frames);
 button(editor.root, "Отменить").click();
 assert.equal(editor.state.sam3.frameReady, true, "undoing a stroke keeps the approved SAM3 seed");
 assert.equal(button(editor.root, "Отследить видео").disabled, false);
-assert.equal(button(editor.root, "Запустить H3").disabled, true);
+assert.equal(button(editor.root, "Запустить граф").disabled, true);
 button(editor.root, "Повторить").click();
 assert.equal(JSON.stringify(editor.document.frames), correctedFrames);
 assert.equal(editor.state.sam3.frameReady, true, "redoing a stroke keeps the approved SAM3 seed");
@@ -221,13 +221,13 @@ await new Promise((resolve) => setImmediate(resolve));
 const staleTrackPromptId = editor.state.pendingPreview.promptId;
 await editor.applyExecuted({ prompt_id: staleTrackPromptId, universal_mask_meta: [{ source, has_mask: true, sam3: { frame_ready: true, track_ready: true, frame: 0, seed_token: "stale-token", direction: "both", computed_frames: [0, 1, 2] } }] });
 assert.equal(editor.state.sam3.trackReady, false, "track output with the wrong token is rejected");
-assert.equal(button(editor.root, "Запустить H3").disabled, true);
+assert.equal(button(editor.root, "Запустить граф").disabled, true);
 
 // Source mismatch clears stale readiness and blocks downstream work.
 await editor.applyExecuted({ universal_mask_meta: [{ source_mismatch: true, source_mismatch_reason: "fingerprint", previous_source: source, source: { ...source, fingerprint: "other" }, has_mask: false }] });
 assert.equal(editor.state.sam3.frameReady, false);
 assert.equal(editor.state.sam3.trackReady, false);
-assert.equal(button(editor.root, "Запустить H3").disabled, true);
+assert.equal(button(editor.root, "Запустить граф").disabled, true);
 editor.destroy();
 
 const freshNode = { id: 9, widgets: [{ name: "mask_data", value: "{}" }], graph: { setDirtyCanvas() {} }, addDOMWidget(_name, _type, root) { this.root = root; } };

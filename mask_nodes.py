@@ -13,7 +13,6 @@ from typing import Any
 
 import numpy as np
 
-from .h3_window import mask_extent
 from .mask_core import (
     MAX_FRAMES,
     MAX_PREVIEW_SIZE,
@@ -50,33 +49,39 @@ def _image_array(images: Any) -> np.ndarray:
 
 
 def _normalize_images(images: np.ndarray) -> np.ndarray:
-    return np.nan_to_num(images.astype(np.float32, copy=False), nan=0.0, posinf=1.0, neginf=0.0)
+    source = np.asarray(images, dtype=np.float32)
+    if source.ndim == 3:
+        return source if np.isfinite(source).all() else np.nan_to_num(source, nan=0.0, posinf=1.0, neginf=0.0)
+    invalid = [index for index, frame in enumerate(source) if not np.isfinite(frame).all()]
+    if invalid:
+        source = source.copy()
+        for index in invalid:
+            np.nan_to_num(source[index], copy=False, nan=0.0, posinf=1.0, neginf=0.0)
+    return source
 
 
 def _torch_tensor(array: np.ndarray):
     import torch
 
-    return torch.from_numpy(np.asarray(array, dtype=np.float32).copy())
+    return torch.from_numpy(np.asarray(array, dtype=np.float32))
 
 
 def _preview_tensor(images: np.ndarray, mask: np.ndarray):
     """Make a lightweight green-overlay IMAGE preview without touching source."""
 
-    image = np.asarray(images, dtype=np.float32).copy()
-    if image.shape[-1] == 1:
-        image = np.repeat(image, 3, axis=-1)
-    if image.shape[-1] < 3:
+    if images.shape[-1] == 2 or images.shape[-1] < 1:
         raise MaskDataError("images must have one or at least three channels")
-    image = image[..., :3]
-    alpha = np.clip(mask[..., None], 0.0, 1.0) * 0.38
-    green = np.zeros_like(image)
-    green[..., 1] = 1.0
-    return _torch_tensor(image * (1.0 - alpha) + green * alpha)
+    output = np.empty((*mask.shape, 3), dtype=np.float32)
+    for frame, frame_mask, destination in zip(images, mask, output):
+        alpha = np.clip(frame_mask, 0.0, 1.0) * 0.38
+        np.multiply(frame[..., :3], (1.0 - alpha)[..., None], out=destination)
+        destination[..., 1] += alpha
+    return _torch_tensor(output)
 
 
 def _execution_blocker(message: str | None):
     # Comfy moved this helper once; keep the add-on importable in test Python
-    # and block downstream H3 work whenever the installed runtime supports it.
+    # and block downstream graph work whenever the installed runtime supports it.
     for module_name in ("comfy_execution.graph_utils", "comfy_execution.graph"):
         try:
             module = __import__(module_name, fromlist=["ExecutionBlocker"])
@@ -270,7 +275,7 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
 
 def _opencv_refinement_available() -> bool:
     try:
-        import ths_universal_inpaint.mask_core as core
+        from . import mask_core as core
 
         return core.cv2 is not None
     except Exception:
@@ -298,17 +303,17 @@ def _refinement_capabilities() -> dict[str, Any]:
 
 
 class THSUniversalMaskEditor:
-    """Paint/shape any inpaint area and track it through a video clip.
+    """Paint or select any object/region and track its mask through a video clip.
 
     Empty ``mask_data`` is a preview-only pass: the node returns bounded frame
     previews in ``ui`` and blocks downstream graph work when Comfy's
-    ``ExecutionBlocker`` is available.  Queue again after drawing and the
-    generated mask is released to the rest of the H3 workflow.
+    ``ExecutionBlocker`` is available.  Queue again after creating the mask
+    and the generated mask is released to downstream workflow nodes.
     """
 
     OUTPUT_NODE = True
     FUNCTION = "run"
-    CATEGORY = "Universal Inpaint/Masking"
+    CATEGORY = "Universal Mask Editor"
     RETURN_TYPES = ("MASK", "IMAGE")
     RETURN_NAMES = ("edit_mask", "preview")
 
@@ -326,6 +331,7 @@ class THSUniversalMaskEditor:
             },
             "optional": {
                 "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 0.01}),
+                "preview_output": ("BOOLEAN", {"default": True, "tooltip": "Формировать видео с зелёной маской для выхода preview. Предпросмотр внутри редактора работает и без этого выхода."}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -339,7 +345,7 @@ class THSUniversalMaskEditor:
         return "tracking_mode must be optical_flow, static, keyframes, or sam3"
 
     def run(self, images, mask_data="{}", tracking_mode="optical_flow", grow=8, feather=4,
-            start_frame=0, end_frame=-1, fps=24.0, unique_id=None):
+            start_frame=0, end_frame=-1, fps=24.0, unique_id=None, preview_output=True):
         del unique_id  # token isolation uses the per-node output session signature
         source = _image_array(images)
         count, height, width = map(int, source.shape[:3])
@@ -402,7 +408,7 @@ class THSUniversalMaskEditor:
             if sam3_meta.get("seed_token"):
                 bound_document["sam3"]["seed_token"] = str(sam3_meta["seed_token"])
         canonical = canonical_mask_data(bound_document, count, width=width, height=height, fingerprint=fingerprint)
-        has_mask = bool(np.any(mask > 1e-5))
+        has_mask = any(float(frame.max()) > 1e-5 for frame in mask)
         previews = encode_preview_assets(source, mask)
         lazy_frames, cache_info = cache_preview_assets(
             source,
@@ -411,7 +417,7 @@ class THSUniversalMaskEditor:
             source_session=session,
         )
         raw_cache_info = raw_tracking_cache_info()
-        preview = _preview_tensor(source, mask)
+        preview = _preview_tensor(source, mask) if preview_output else _execution_blocker(None)
         meta = {
             "version": 1,
             "session": session,
@@ -422,7 +428,6 @@ class THSUniversalMaskEditor:
             "end_frame": count - 1 if int(end_frame) < 0 else min(count - 1, int(end_frame)),
             "anchors": sorted(int(frame) for frame in anchors),
             "has_mask": has_mask,
-            "h3_extent": mask_extent(mask) if has_mask else None,
             "preview_frames": len(previews),
             "all_frame_cache_available": bool(cache_info.get("available")),
             # Keep a short alias for clients that describe the capability as
@@ -442,15 +447,15 @@ class THSUniversalMaskEditor:
             if not bool(sam3_meta.get("frame_ready")):
                 status = "SAM3 seed frame is not ready. Select a marked object box and Calculate frame."
             elif not bool(sam3_meta.get("track_ready")):
-                status = "SAM3 frame ready — press Track video before running downstream H3."
+                status = "SAM3 frame ready — press Track video before running downstream nodes."
             elif has_mask:
-                status = "SAM3 video mask ready — queue again to run the downstream H3 graph."
+                status = "SAM3 video mask ready — queue again to run downstream nodes."
             else:
                 status = "SAM3 tracking produced an empty selected-object mask; review the range and prompt."
         elif str(tracking_mode) == "optical_flow" and not optical_flow_available():
-            status = "OpenCV optical flow is unavailable; unanchored frames hold the nearest anchor. Verify preview before H3."
+            status = "OpenCV optical flow is unavailable; unanchored frames hold the nearest anchor. Verify preview before running the graph."
         elif has_mask:
-            status = "Mask ready — queue again to run the downstream H3 graph."
+            status = "Mask ready — queue again to run downstream nodes."
         else:
             status = "Preview prepared. Paint a region, then Queue again; empty masks stay blocked."
         if not cache_info.get("available"):
@@ -475,7 +480,7 @@ class THSUniversalMaskEditor:
 
 
 NODE_CLASS_MAPPINGS = {"THSUniversalMaskEditor": THSUniversalMaskEditor}
-NODE_DISPLAY_NAME_MAPPINGS = {"THSUniversalMaskEditor": "Universal Video Mask Editor"}
+NODE_DISPLAY_NAME_MAPPINGS = {"THSUniversalMaskEditor": "Video Mask Editor"}
 
 
 __all__ = ["THSUniversalMaskEditor", "NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

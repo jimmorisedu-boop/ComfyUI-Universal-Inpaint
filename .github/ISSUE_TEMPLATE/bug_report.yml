@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible Universal Inpaint problem
+description: Report a reproducible Video Mask Editor (THSUniversalMaskEditor) problem
 title: "[bug] "
 labels: [bug]
 body:
@@ -10,8 +10,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: Universal Inpaint version
-      placeholder: 0.1.0 or commit
+      label: Video Mask Editor version
+      placeholder: 0.2.0 or commit
     validations:
       required: true
   - type: input
