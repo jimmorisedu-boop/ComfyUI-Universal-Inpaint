@@ -20,6 +20,8 @@ from .mask_core import (
     MaskDataError,
     MaskRefinementError,
     MaskSourceMismatch,
+    _apply_layer_blend,
+    _compute_layer_raw,
     _data_url,
     _json_value,
     _mask_png_payload,
@@ -127,7 +129,7 @@ def _blocked_source_response(
     installed Comfy runtime provides ``ExecutionBlocker``.
     """
 
-    blockers = tuple(_execution_blocker(None) for _ in range(5))
+    blockers = tuple(_execution_blocker(None) for _ in range(6))
     if any(item is None for item in blockers):
         raise diagnostic
 
@@ -220,30 +222,145 @@ def _source_signature(images: np.ndarray, fingerprint: str) -> str:
     return hashlib.sha1(f"{count}:{height}:{width}:{fingerprint}".encode("ascii")).hexdigest()[:16]
 
 
+def _active_layer_entry(parsed: dict[str, Any]) -> dict[str, Any] | None:
+    layers = parsed.get("layers")
+    if not isinstance(layers, list) or not layers:
+        return None
+    active_id = str(parsed.get("active_layer_id") or "")
+    for layer in layers:
+        if isinstance(layer, dict) and str(layer.get("id") or "") == active_id:
+            return layer
+    return layers[0] if isinstance(layers[0], dict) else None
+
+
 def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, start_frame, end_frame):
     """Return the changed mask and edit base over the browser's cached source."""
     count, height, width = map(int, source.shape[:3])
     if count > MAX_FRAMES:
         raise MaskDataError("clips longer than 4096 frames are not supported by this editor")
     parsed = parse_mask_data(document, count, width=width, height=height, fingerprint=fingerprint)
-    sam3 = parsed.get("sam3", {})
+    active_layer = _active_layer_entry(parsed)
+    if active_layer is not None:
+        if active_layer.get("type") != "sam3":
+            return None
+        sam3 = active_layer.get("sam3") if isinstance(active_layer.get("sam3"), dict) else {}
+        layer_doc: dict[str, Any] = {
+            "version": 1,
+            "frames": active_layer.get("frames", {}),
+            "tracking_mode": "sam3",
+            "sam3": sam3,
+        }
+        if active_layer.get("anchors"):
+            layer_doc["anchors"] = active_layer["anchors"]
+        range_start = int(active_layer.get("start_frame", 0))
+        range_end = int(active_layer.get("end_frame", -1))
+    else:
+        layer_doc = parsed
+        sam3 = parsed.get("sam3", {})
+        range_start = int(start_frame)
+        range_end = int(end_frame)
+
     frame = sam3.get("frame")
-    if sam3.get("action") != "frame" or frame is None or not _prompt_events(parsed, frame):
+    if sam3.get("action") != "frame" or frame is None or not _prompt_events(layer_doc, frame):
         return None
     blocker = _execution_blocker(None)
     if blocker is None:
         return None
-    start = max(0, int(start_frame))
-    end = count - 1 if int(end_frame) < 0 else min(count - 1, int(end_frame))
+    start = max(0, range_start)
+    end = count - 1 if range_end < 0 else min(count - 1, range_end)
     if not start <= frame <= end:
         return None  # Use the ordinary range validation and recovery path.
 
     t0 = time.perf_counter()
-    base, seed, sam3_meta = calculate_frame(source, parsed, frame=frame, interactive=True)
+    base, seed, sam3_meta = calculate_frame(source, layer_doc, frame=frame, interactive=True)
     prediction_ms = round((time.perf_counter() - t0) * 1000)
     base = base.astype(np.float32)
-    events = _overlay_events(parsed, frame)
-    drawn = rasterize_events(events, height, width, _normalize_images(source[frame]), base) if events else base
+    sam3["seed_token"] = seed.token
+    if isinstance(parsed.get("sam3"), dict):
+        parsed["sam3"]["seed_token"] = seed.token
+
+    norm_source = _normalize_images(source)
+    events = _overlay_events(layer_doc, frame)
+    drawn_active = rasterize_events(events, height, width, norm_source[frame], base) if events else base
+
+    layers_preview_meta: list[dict[str, Any]] = []
+    if isinstance(parsed.get("layers"), list):
+        drawn = np.zeros((height, width), dtype=np.float32)
+        composite_base = np.zeros((height, width), dtype=np.float32)
+        active_id = str(active_layer.get("id") or "") if active_layer else ""
+        for layer in parsed["layers"]:
+            if not layer.get("enabled", True):
+                layers_preview_meta.append({
+                    "id": layer["id"],
+                    "name": layer["name"],
+                    "type": layer["type"],
+                    "blend": layer["blend"],
+                    "enabled": False,
+                    "start_frame": int(layer.get("start_frame", 0)),
+                    "end_frame": int(layer.get("end_frame", -1)),
+                    "has_mask": False,
+                    "anchors": [],
+                })
+                continue
+            if str(layer["id"]) == active_id:
+                l_raw_frame = drawn_active
+                l_base_frame = base
+                l_sam3 = sam3_meta
+                l_has = bool(np.any(drawn_active > 1e-5))
+                l_anchors = [int(frame)]
+            else:
+                o_start = max(0, int(layer.get("start_frame", 0)))
+                o_end_raw = int(layer.get("end_frame", -1))
+                o_end = count - 1 if o_end_raw < 0 else min(count - 1, o_end_raw)
+                o_doc: dict[str, Any] = {
+                    "version": 1,
+                    "frames": layer.get("frames", {}),
+                    "tracking_mode": layer["type"],
+                }
+                if layer.get("anchors"):
+                    o_doc["anchors"] = layer["anchors"]
+                if layer["type"] == "sam3" and isinstance(layer.get("sam3"), dict):
+                    o_doc["sam3"] = layer["sam3"]
+                # Skip untracked companion SAM3 layers so frame preview never triggers an extra native track.
+                if layer["type"] == "sam3" and not (
+                    isinstance(o_doc.get("sam3"), dict)
+                    and o_doc["sam3"].get("action") == "track"
+                    and o_doc["sam3"].get("seed_token")
+                ):
+                    l_raw_frame = np.zeros((height, width), dtype=np.float32)
+                    l_sam3 = {}
+                    l_anchors = []
+                else:
+                    try:
+                        l_seq, _, l_anchors_set, l_sam3 = _compute_layer_raw(
+                            norm_source, o_doc, tracking_mode=layer["type"], start=o_start, end=o_end
+                        )
+                        l_raw_frame = l_seq[frame]
+                        l_anchors = sorted(int(f) for f in l_anchors_set)
+                    except SAM3VideoError:
+                        l_raw_frame = np.zeros((height, width), dtype=np.float32)
+                        l_sam3 = {}
+                        l_anchors = []
+                l_base_frame = l_raw_frame
+                l_has = bool(np.any(l_raw_frame > 1e-5))
+            _apply_layer_blend(drawn, l_raw_frame, layer["blend"])
+            _apply_layer_blend(composite_base, l_base_frame, layer["blend"])
+            layers_preview_meta.append({
+                "id": layer["id"],
+                "name": layer["name"],
+                "type": layer["type"],
+                "blend": layer["blend"],
+                "enabled": True,
+                "start_frame": int(layer.get("start_frame", 0)),
+                "end_frame": int(layer.get("end_frame", -1)),
+                "has_mask": l_has,
+                "anchors": l_anchors,
+                **({"sam3": dict(l_sam3)} if layer["type"] == "sam3" and l_sam3 else {}),
+            })
+    else:
+        drawn = drawn_active
+        composite_base = base
+
     mask = postprocess_mask(drawn[None], grow=int(grow), feather=int(feather))[0]
     scale = min(1.0, MAX_PREVIEW_SIZE / max(width, height))
     size = (max(1, round(width * scale)), max(1, round(height * scale)))
@@ -251,7 +368,7 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
         "frame": frame,
         "mask": _data_url(_mask_png_payload(mask, size), "image/png"),
         "raw_mask": _data_url(_mask_png_payload(drawn, size), "image/png"),
-        "edit_base": _data_url(_mask_png_payload(base, size), "image/png"),
+        "edit_base": _data_url(_mask_png_payload(composite_base, size), "image/png"),
     }
     if seed.objects:
         from PIL import Image
@@ -260,12 +377,16 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
         # overlapping objects independently clickable with one small image.
         membership = np.zeros((size[1], size[0]), dtype=np.uint8)
         for index, (_, object_mask) in enumerate(seed.objects):
+            obj_frame = seed.object_frames[index] if index < len(seed.object_frames) else seed.frame
+            if int(obj_frame) != int(frame):
+                continue
             thumbnail = Image.fromarray(object_mask).resize(size, Image.Resampling.NEAREST)
             membership |= np.asarray(thumbnail, dtype=np.uint8) << index
         patch["object_map"] = _data_url(_mask_png_payload(membership / 255.0, size), "image/png")
+    if sam3_meta.get("keep_existing_mask"):
+        patch["keep_existing_mask"] = True
     bound_source = {"frames": count, "width": width, "height": height, "fingerprint": fingerprint}
     parsed["source"] = bound_source
-    sam3["seed_token"] = seed.token
     extent = mask_extent(mask[None])
     if extent is not None:
         extent = {"box": extent["box"], "frames": [int(frame)]}
@@ -293,13 +414,16 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
         "mask_postprocess": applied_postprocess,
         "crop_plan": crop_plan,
     }
+    if layers_preview_meta:
+        meta["layers"] = layers_preview_meta
+        meta["active_layer_id"] = str(parsed.get("active_layer_id") or layers_preview_meta[0]["id"])
     return {
         "ui": {
             "universal_mask_frame_patch": [patch],
             "universal_mask_meta": [meta],
             "universal_mask_data": [canonical_mask_data(parsed, count, width=width, height=height, fingerprint=fingerprint)],
         },
-        "result": (blocker, blocker, blocker, blocker, blocker),
+        "result": (blocker, blocker, blocker, blocker, blocker, blocker),
     }
 
 
@@ -352,8 +476,8 @@ class THSUniversalMaskEditor:
         "video mask editor",
         "universal mask editor",
     ]
-    RETURN_TYPES = ("MASK", "IMAGE", "IMAGE", "MASK", "STRING")
-    RETURN_NAMES = ("edit_mask", "preview", "cropped_images", "cropped_mask", "crop_info")
+    RETURN_TYPES = ("MASK", "IMAGE", "IMAGE", "MASK", "STRING", "IMAGE")
+    RETURN_NAMES = ("edit_mask", "preview", "cropped_images", "cropped_mask", "crop_info", "original_images")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -391,7 +515,12 @@ class THSUniversalMaskEditor:
         session = _source_signature(source, fingerprint)
         editor_frame_preview = False
         try:
-            if str(tracking_mode) == "sam3":
+            wants_sam3_preview = (
+                str(tracking_mode) == "sam3"
+                or (isinstance(mask_data, str) and SAM3_FRAME_PREVIEW in mask_data)
+                or (isinstance(mask_data, dict) and mask_data.get("editor_request") == SAM3_FRAME_PREVIEW)
+            )
+            if wants_sam3_preview:
                 mask_data = _json_value(mask_data)
                 editor_frame_preview = mask_data.get("editor_request") == SAM3_FRAME_PREVIEW
                 if editor_frame_preview:
@@ -402,7 +531,7 @@ class THSUniversalMaskEditor:
                     if response is not None:
                         return response
             source = _normalize_images(source)
-            mask, parsed, anchors, edit_bases, sam3_meta, raw_mask = build_mask_sequence(
+            mask, parsed, anchors, edit_bases, sam3_meta, raw_mask, layers_meta = build_mask_sequence(
                 source,
                 mask_data,
                 tracking_mode=tracking_mode,
@@ -414,6 +543,7 @@ class THSUniversalMaskEditor:
                 return_edit_bases=True,
                 return_sam3_meta=True,
                 return_raw_mask=True,
+                return_layers_meta=True,
             )
         except (MaskSourceMismatch, MaskRefinementError, SAM3VideoError) as exc:
             if editor_frame_preview and not isinstance(exc, MaskSourceMismatch):
@@ -439,16 +569,16 @@ class THSUniversalMaskEditor:
             "height": height,
             "fingerprint": fingerprint,
         }
-        if str(tracking_mode) == "sam3":
-            bound_document["sam3"] = dict(bound_document.get("sam3", {}))
-            # A frame calculation returns the generated token through meta;
-            # include it in the canonical document so a queue/reload can carry
-            # the exact source-bound prerequisite into the explicit Track step.
-            if sam3_meta.get("seed_token"):
-                bound_document["sam3"]["seed_token"] = str(sam3_meta["seed_token"])
+        if str(tracking_mode) == "sam3" or ("layers" in bound_document and sam3_meta):
+            if "sam3" in bound_document or str(tracking_mode) == "sam3":
+                bound_document["sam3"] = dict(bound_document.get("sam3", {}))
+                # A frame calculation returns the generated token through meta;
+                # include it in the canonical document so a queue/reload can carry
+                # the exact source-bound prerequisite into the explicit Track step.
+                if sam3_meta.get("seed_token"):
+                    bound_document["sam3"]["seed_token"] = str(sam3_meta["seed_token"])
         canonical = canonical_mask_data(bound_document, count, width=width, height=height, fingerprint=fingerprint)
         has_mask = any(float(frame.max()) > 1e-5 for frame in mask)
-        previews = encode_preview_assets(source, mask)
         lazy_frames, cache_info = cache_preview_assets(
             source,
             mask,
@@ -456,6 +586,10 @@ class THSUniversalMaskEditor:
             raw_masks=raw_mask,
             source_session=session,
         )
+        preview_kwargs: dict[str, Any] = {}
+        if not cache_info.get("available"):
+            preview_kwargs = {"edit_bases": edit_bases, "raw_masks": raw_mask}
+        previews = encode_preview_assets(source, mask, **preview_kwargs)
         raw_cache_info = raw_tracking_cache_info()
         preview = _preview_tensor(source, mask) if preview_output else _execution_blocker(None)
         extent = mask_extent(mask)
@@ -493,9 +627,35 @@ class THSUniversalMaskEditor:
             "mask_postprocess": applied_postprocess,
             "crop_plan": crop_plan,
         }
-        if str(tracking_mode) == "sam3":
+        if layers_meta:
+            meta["layers"] = layers_meta
+            meta["active_layer_id"] = str(parsed.get("active_layer_id") or layers_meta[0]["id"])
+        untracked_sam3 = False
+        if layers_meta and isinstance(parsed.get("layers"), list):
+            layer_meta_map = {str(item.get("id")): item for item in layers_meta}
+            for layer in parsed["layers"]:
+                if not layer.get("enabled", True) or layer.get("type") != "sam3":
+                    continue
+                l_sam3_cfg = layer.get("sam3") if isinstance(layer.get("sam3"), dict) else {}
+                l_doc = {
+                    "version": 1,
+                    "frames": layer.get("frames", {}),
+                    **({"sam3": l_sam3_cfg} if l_sam3_cfg else {}),
+                }
+                l_frame = int(l_sam3_cfg.get("frame", max(0, int(layer.get("start_frame", 0)))))
+                has_prompt = bool(_prompt_events(l_doc, l_frame))
+                l_track_ready = bool(
+                    layer_meta_map.get(str(layer.get("id")), {}).get("sam3", {}).get("track_ready")
+                )
+                if has_prompt and not l_track_ready:
+                    untracked_sam3 = True
+                    break
+        else:
+            untracked_sam3 = str(tracking_mode) == "sam3" and not bool(sam3_meta.get("track_ready"))
+
+        if str(tracking_mode) == "sam3" or sam3_meta:
             meta["sam3"] = dict(sam3_meta)
-        if str(tracking_mode) == "sam3":
+        if str(tracking_mode) == "sam3" and not (layers_meta and has_mask and not untracked_sam3):
             if not bool(sam3_meta.get("frame_ready")):
                 status = "SAM3 seed frame is not ready. Select a marked object box and Calculate frame."
             elif not bool(sam3_meta.get("track_ready")):
@@ -504,6 +664,8 @@ class THSUniversalMaskEditor:
                 status = "SAM3 video mask ready — queue again to run downstream nodes."
             else:
                 status = "SAM3 tracking produced an empty selected-object mask; review the range and prompt."
+        elif untracked_sam3:
+            status = "SAM3 layer is waiting for Track video before running downstream nodes."
         elif str(tracking_mode) == "optical_flow" and not optical_flow_available():
             status = "OpenCV optical flow is unavailable; unanchored frames hold the nearest anchor. Verify preview before running the graph."
         elif has_mask:
@@ -523,10 +685,11 @@ class THSUniversalMaskEditor:
         cropped_images_out: Any = _torch_tensor(source[:, crop_y:crop_b, crop_x:crop_r])
         cropped_mask_out: Any = _torch_tensor(mask[:, crop_y:crop_b, crop_x:crop_r])
         crop_info_out: Any = json.dumps(crop_plan, ensure_ascii=False)
-        if not has_mask or (str(tracking_mode) == "sam3" and not bool(sam3_meta.get("track_ready"))):
+        original_images_out: Any = images if hasattr(images, "detach") else _torch_tensor(source)
+        if not has_mask or untracked_sam3:
             blocker = _execution_blocker(
                 "THSUniversalMaskEditor is waiting for a completed SAM3 video track or a non-empty mask."
-                if str(tracking_mode) == "sam3"
+                if (str(tracking_mode) == "sam3" or untracked_sam3)
                 else "THSUniversalMaskEditor is waiting for a non-empty mask. Paint/shape the target and queue again."
             )
             if blocker is not None:
@@ -534,7 +697,8 @@ class THSUniversalMaskEditor:
                 cropped_images_out = blocker
                 cropped_mask_out = blocker
                 crop_info_out = blocker
-        return {"ui": ui, "result": (mask_output, preview, cropped_images_out, cropped_mask_out, crop_info_out)}
+                original_images_out = blocker
+        return {"ui": ui, "result": (mask_output, preview, cropped_images_out, cropped_mask_out, crop_info_out, original_images_out)}
 
 
 class THSUniversalMaskRestoreCrop:

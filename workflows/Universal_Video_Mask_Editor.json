@@ -159,6 +159,11 @@
           "name": "crop_info",
           "type": "STRING",
           "links": []
+        },
+        {
+          "name": "original_images",
+          "type": "IMAGE",
+          "links": []
         }
       ],
       "properties": {

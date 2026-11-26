@@ -41,8 +41,8 @@ def test_node_contract_matches_workflow_schema_without_importing_torch():
     assert required["end_frame"][1]["default"] == -1
     assert inputs["optional"]["fps"][0] == "FLOAT"
     assert inputs["hidden"]["unique_id"] == "UNIQUE_ID"
-    assert THSUniversalMaskEditor.RETURN_TYPES == ("MASK", "IMAGE", "IMAGE", "MASK", "STRING")
-    assert THSUniversalMaskEditor.RETURN_NAMES == ("edit_mask", "preview", "cropped_images", "cropped_mask", "crop_info")
+    assert THSUniversalMaskEditor.RETURN_TYPES == ("MASK", "IMAGE", "IMAGE", "MASK", "STRING", "IMAGE")
+    assert THSUniversalMaskEditor.RETURN_NAMES == ("edit_mask", "preview", "cropped_images", "cropped_mask", "crop_info", "original_images")
     assert THSUniversalMaskEditor.OUTPUT_NODE is True
 
 
@@ -88,7 +88,7 @@ def test_source_mismatch_returns_source_only_preview_and_blocks_both_outputs(mon
         source, document, tracking_mode="static", grow=0, feather=0, fps=24.0
     )
     assert document == original
-    assert _ExecutionBlocker.calls == [None, None, None, None, None]
+    assert _ExecutionBlocker.calls == [None, None, None, None, None, None]
     assert all(getattr(item, "message", "not-blocked") is None for item in response["result"])
     assert "universal_mask_data" not in response["ui"]
     assert response["ui"]["universal_mask_preview"][0]["mask_zero"] is True
@@ -115,7 +115,7 @@ def test_refinement_failure_returns_source_only_preview_and_blocks_both_outputs(
     response = THSUniversalMaskEditor().run(
         source, document, tracking_mode="static", grow=0, feather=0
     )
-    assert _ExecutionBlocker.calls == [None, None, None, None, None]
+    assert _ExecutionBlocker.calls == [None, None, None, None, None, None]
     assert all(getattr(item, "message", "not-blocked") is None for item in response["result"])
     assert "universal_mask_data" not in response["ui"]
     meta = response["ui"]["universal_mask_meta"][0]
@@ -244,9 +244,10 @@ def test_autocrop_modes_crop_images_and_masks_accurately(monkeypatch):
         },
     }
     res_auto = THSUniversalMaskEditor().run(source, auto_doc, tracking_mode="static", grow=4, feather=2)
-    mask_full, _, cropped_img, cropped_mask, crop_info_raw = res_auto["result"]
+    mask_full, _, cropped_img, cropped_mask, crop_info_raw, original_img = res_auto["result"]
     crop_info = json.loads(crop_info_raw)
     assert crop_info["mode"] == "auto"
+    assert tuple(original_img.shape) == tuple(source.shape)
     assert tuple(cropped_img.shape) == (3, crop_info["height"], crop_info["width"], 3)
     assert tuple(cropped_mask.shape) == (3, crop_info["height"], crop_info["width"])
     assert 120 <= crop_info["width"] < 400 and 100 <= crop_info["height"] < 300
@@ -275,9 +276,10 @@ def test_autocrop_modes_crop_images_and_masks_accurately(monkeypatch):
         "frames": auto_doc["frames"],
     }
     res_mult = THSUniversalMaskEditor().run(source, mult_doc, tracking_mode="static", grow=4, feather=2)
-    _, _, mult_img, mult_mask, mult_info_raw = res_mult["result"]
+    _, _, mult_img, mult_mask, mult_info_raw, mult_orig = res_mult["result"]
     mult_info = json.loads(mult_info_raw)
     assert mult_info["multiple"] == 64
+    assert tuple(mult_orig.shape) == tuple(source.shape)
     assert mult_info["width"] % 64 == 0 and mult_info["height"] % 64 == 0
     assert tuple(mult_img.shape) == (3, mult_info["height"], mult_info["width"], 3)
     assert tuple(mult_mask.shape) == (3, mult_info["height"], mult_info["width"])
@@ -352,7 +354,8 @@ def test_restore_crop_roundtrip_with_cropped_and_full_masks(monkeypatch):
         grow=0,
         feather=0,
     )["result"]
-    edit_mask, _preview, cropped_images, cropped_mask, crop_info = editor_out
+    edit_mask, _preview, cropped_images, cropped_mask, crop_info, original_images = editor_out
+    np.testing.assert_allclose(original_images, source, atol=1e-6)
     info = parse_crop_info(crop_info, orig_h=128, orig_w=160)
     left, top, right, bottom = info["box"]
     assert info["multiple"] == 16
@@ -361,7 +364,7 @@ def test_restore_crop_roundtrip_with_cropped_and_full_masks(monkeypatch):
 
     edited_crop = np.clip(cropped_images + 0.25, 0.0, 1.0)
     restored_from_crop, applied_from_crop = THSUniversalMaskRestoreCrop().run(
-        source,
+        original_images,
         edited_crop,
         crop_info,
         mask=cropped_mask,
@@ -517,6 +520,27 @@ def test_restore_crop_frame_broadcast_active_frames_and_partial_clip():
     np.testing.assert_allclose(mask_aligned[3], full_edit_mask[3], atol=1e-6)
     np.testing.assert_allclose(out_aligned[1, :, :, 0], full_edit_mask[1], atol=1e-6)
 
+    # Full-timeline cropped_images (T_crop=5) + cropped_mask (T_mask=5) from editor align by orig_idx without shift.
+    full_crop_timeline = np.stack(
+        [np.full((32, 32, 3), 0.1 * (idx + 1), dtype=np.float32) for idx in range(5)],
+        axis=0,
+    )
+    full_crop_mask_timeline = full_edit_mask[:, 16:48, 16:48]
+    out_timeline, mask_timeline = restore_crop_window(
+        source,
+        full_crop_timeline,
+        info,
+        mask=full_crop_mask_timeline,
+    )
+    np.testing.assert_allclose(out_timeline[0], 0.0, atol=1e-6)
+    np.testing.assert_allclose(out_timeline[4], 0.0, atol=1e-6)
+    np.testing.assert_allclose(mask_timeline[1], full_edit_mask[1], atol=1e-6)
+    np.testing.assert_allclose(mask_timeline[2], full_edit_mask[2], atol=1e-6)
+    np.testing.assert_allclose(mask_timeline[3], full_edit_mask[3], atol=1e-6)
+    assert np.allclose(out_timeline[1, 20:28, 20:28, :], 0.2, atol=1e-6)
+    assert np.allclose(out_timeline[2, 28:36, 28:36, :], 0.3, atol=1e-6)
+    assert np.allclose(out_timeline[3, 36:44, 36:44, :], 0.4, atol=1e-6)
+
 
 def test_restore_crop_pil_fallback_and_validation(monkeypatch):
     monkeypatch.setattr(mask_core, "cv2", None)
@@ -553,3 +577,103 @@ def test_restore_crop_pil_fallback_and_validation(monkeypatch):
         restore_crop_window(source, crop, info, resize_method="spline99")
     with pytest.raises(MaskDataError, match="color_match"):
         restore_crop_window(source, crop, info, color_match="histogram")
+
+
+def test_node_multilayer_meta_frame_preview_and_smart_blocker(monkeypatch):
+    import ths_universal_inpaint.mask_sam3_video as sam3_video
+
+    _install_execution_blocker(monkeypatch)
+    sam3_video.clear_sam3_video_cache()
+    source = np.zeros((3, 32, 40, 3), dtype=np.float32)
+
+    def fake_predict(image, event, **_kwargs):
+        mask = np.zeros((32, 40), dtype=bool)
+        mask[4:12, 4:14] = True
+        return mask
+
+    monkeypatch.setattr(sam3_video, "_predict_native", fake_predict)
+
+    # 1) Empty or disabled SAM3 layer must NOT block a ready Static layer from emitting downstream outputs.
+    mixed_doc = json.dumps(
+        {
+            "layers": [
+                {"id": "l-sam3", "name": "SAM3", "type": "sam3", "blend": "add", "enabled": True, "frames": {}},
+                {
+                    "id": "l-static",
+                    "name": "Статика",
+                    "type": "static",
+                    "blend": "add",
+                    "enabled": True,
+                    "frames": {"0": {"events": [{"type": "rect", "mode": "add", "x": 0.5, "y": 0.5, "w": 0.3, "h": 0.3}]}},
+                },
+            ],
+            "active_layer_id": "l-sam3",
+        }
+    )
+    res_mixed = THSUniversalMaskEditor().run(source, mixed_doc, tracking_mode="sam3", grow=0, feather=0)
+    mask_out, preview_out, cropped_out, cropped_mask_out, crop_info_out, orig_out = res_mixed["result"]
+    assert not isinstance(mask_out, _ExecutionBlocker), "ready Static layer releases downstream outputs despite empty SAM3 layer"
+    assert mask_out.any() and preview_out is not None and cropped_out is not None and cropped_mask_out is not None
+    assert isinstance(crop_info_out, str) and orig_out.shape == source.shape
+    meta_mixed = res_mixed["ui"]["universal_mask_meta"][0]
+    assert meta_mixed["active_layer_id"] == "l-sam3"
+    assert len(meta_mixed["layers"]) == 2
+    assert meta_mixed["layers"][0]["has_mask"] is False and meta_mixed["layers"][1]["has_mask"] is True
+
+    # 2) Disabled prompted SAM3 layer does not block either.
+    disabled_sam3_doc = json.dumps(
+        {
+            "layers": [
+                {
+                    "id": "l-sam3",
+                    "type": "sam3",
+                    "blend": "add",
+                    "enabled": False,
+                    "sam3": {"action": "frame", "frame": 0, "direction": "both", "prompt": {"frame": 0, "points": [[0.2, 0.2]], "labels": [1]}},
+                    "frames": {},
+                },
+                {
+                    "id": "l-static",
+                    "type": "static",
+                    "blend": "add",
+                    "enabled": True,
+                    "frames": {"0": {"events": [{"type": "rect", "mode": "add", "x": 0.5, "y": 0.5, "w": 0.3, "h": 0.3}]}},
+                },
+            ],
+            "active_layer_id": "l-static",
+        }
+    )
+    res_disabled = THSUniversalMaskEditor().run(source, disabled_sam3_doc, tracking_mode="static", grow=0, feather=0)
+    assert not isinstance(res_disabled["result"][0], _ExecutionBlocker)
+
+    # 3) SAM3 frame preview patch composites other enabled layers alongside the active SAM3 frame seed.
+    patch_doc = json.dumps(
+        {
+            "editor_request": "sam3_frame_v1",
+            "layers": [
+                {
+                    "id": "l-sam3",
+                    "type": "sam3",
+                    "blend": "add",
+                    "enabled": True,
+                    "sam3": {"action": "frame", "frame": 0, "direction": "both", "prompt": {"frame": 0, "points": [[0.2, 0.2]], "labels": [1]}},
+                    "frames": {},
+                },
+                {
+                    "id": "l-static",
+                    "type": "static",
+                    "blend": "add",
+                    "enabled": True,
+                    "frames": {"0": {"events": [{"type": "rect", "mode": "add", "x": 0.6, "y": 0.6, "w": 0.25, "h": 0.25}]}},
+                },
+            ],
+            "active_layer_id": "l-sam3",
+        }
+    )
+    patch_res = THSUniversalMaskEditor().run(source, patch_doc, tracking_mode="sam3", grow=0, feather=0)
+    assert "universal_mask_frame_patch" in patch_res["ui"]
+    patch_meta = patch_res["ui"]["universal_mask_meta"][0]
+    assert len(patch_meta["layers"]) == 2
+    assert patch_meta["layers"][0]["has_mask"] is True and patch_meta["layers"][1]["has_mask"] is True
+    # Interactive SAM3 frame preview stops downstream execution cleanly.
+    assert all(isinstance(item, _ExecutionBlocker) for item in patch_res["result"])

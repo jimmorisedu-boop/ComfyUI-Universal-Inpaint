@@ -246,3 +246,65 @@ def test_native_occlusion_is_a_computed_empty_frame():
     assert video._tracked_response_mask(other, [1, 7], shape).all()
     assert video._tracked_response_mask({"obj_ids": np.array([])}, [1], shape) is None
     assert video._tracked_response_mask({**empty, "obj_ids": np.array([1])}, [1], shape) is None
+
+
+def test_multiframe_objects_and_cross_frame_refinements(monkeypatch):
+    images = _clip(frames=5)
+    m_obj1 = np.zeros(images.shape[1:3], dtype=bool)
+    m_obj2 = m_obj1.copy()
+    m_obj1[2:8, 2:10] = True
+    m_obj2[10:16, 15:24] = True
+    predict_frames = []
+
+    def predict(_image, event):
+        f = int(event["frame"])
+        predict_frames.append((f, list(event.get("labels", []))))
+        return m_obj2.copy() if f == 2 else m_obj1.copy()
+
+    video.clear_sam3_video_cache()
+    monkeypatch.setattr(video, "_predict_native", predict)
+
+    # 1. Object 1 anchored on frame 0
+    obj1 = {"frame": 0, "points": [[0.2, 0.2]], "labels": [1]}
+    parsed1 = core.parse_mask_data({"sam3": {"frame": 0, "prompt": obj1}}, len(images))
+    _, seed1, meta1 = video.calculate_frame(images, parsed1, frame=0)
+    assert meta1["computed_frames"] == [0]
+    assert predict_frames == [(0, [1])]
+
+    # 2. Object 2 added on frame 2 reuses cached Object 1 without re-predicting frame 0
+    obj2 = {"frame": 2, "points": [[0.65, 0.65]], "labels": [1]}
+    doc2 = {"sam3": {"frame": 2, "objects": [obj1, obj2]}}
+    parsed2 = core.parse_mask_data(doc2, len(images))
+    mask2, seed2, meta2 = video.calculate_frame(images, parsed2, frame=2)
+    assert predict_frames == [(0, [1]), (2, [1])]
+    assert seed2.object_frames == (0, 2)
+    assert meta2["computed_frames"] == [0, 2]
+    assert np.array_equal(mask2, m_obj2)
+
+    # 3. Cross-frame negative-only refinement on frame 3 keeps existing mask & reuses caches
+    obj1_refined = {
+        **obj1,
+        "refinements": [{"frame": 3, "points": [[0.25, 0.25]], "labels": [0]}],
+    }
+    doc3 = {"sam3": {"frame": 3, "objects": [obj1_refined, obj2]}}
+    parsed3 = core.parse_mask_data(doc3, len(images))
+    mask3, seed3, meta3 = video.calculate_frame(images, parsed3, frame=3)
+    assert predict_frames == [(0, [1]), (2, [1])]
+    assert meta3.get("keep_existing_mask") is True
+    assert seed3.token != seed2.token
+
+    # 4. Track video spans across multi-frame anchors {0, 2, 3}
+    track_calls = []
+
+    def fake_track(imgs, prompts, *, seed, start, end, direction):
+        track_calls.append((seed.object_frames, [p.get("refinements") for p in prompts]))
+        return {idx: (m_obj1 | m_obj2).copy() for idx in range(start, end + 1)}
+
+    monkeypatch.setattr(video, "_native_track", fake_track)
+    res = video.track_video(
+        images, parsed3, frame=3, token=seed3.token, start=0, end=4, direction="both"
+    )
+    assert res.anchors == frozenset({0, 2, 3})
+    assert track_calls and track_calls[0][0] == (0, 2)
+    assert np.any(res.masks[0, 2:8, 2:10]) and np.any(res.masks[2, 10:16, 15:24])
+

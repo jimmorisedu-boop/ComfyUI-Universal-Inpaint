@@ -59,6 +59,7 @@ class SAM3Seed:
     mask: np.ndarray
     object_id: int = 1
     objects: tuple[tuple[str, np.ndarray], ...] = ()
+    object_frames: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -182,18 +183,29 @@ def _prompt_digest(prompts: Iterable[Mapping[str, Any]], frame: int) -> str:
     payload = []
     for item in prompts:
         if isinstance(item.get("points"), (list, tuple)):
-            payload.append({
+            entry: dict[str, Any] = {
                 "frame": int(item.get("frame", frame)),
                 "points": [[float(point[0]), float(point[1])] for point in item.get("points", [])],
                 "labels": [int(label) for label in item.get("labels", [])],
-            })
+            }
         else:
-            payload.append({
+            entry = {
                 "frame": int(item.get("frame", frame)),
                 "box": [float(item[name]) for name in ("x", "y", "w", "h")],
-            })
+            }
         if "object_id" in item:
-            payload[-1]["object_id"] = int(item["object_id"])
+            entry["object_id"] = int(item["object_id"])
+        refs = item.get("refinements")
+        if isinstance(refs, (list, tuple)) and refs:
+            entry["refinements"] = [
+                {
+                    "frame": int(ref.get("frame", frame)),
+                    "points": [[float(pt[0]), float(pt[1])] for pt in ref.get("points", [])],
+                    "labels": [int(lbl) for lbl in ref.get("labels", [])],
+                }
+                for ref in refs
+            ]
+        payload.append(entry)
     encoded = repr((int(frame), payload)).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:32]
 
@@ -224,6 +236,8 @@ def _prompt_events(parsed: Mapping[str, Any], frame: int) -> list[dict[str, Any]
     events: list[dict[str, Any]] = []
     explicit_frames: set[int] = set()
     if isinstance(prompt, Mapping):
+        refs = prompt.get("refinements")
+        clean_refs = [dict(ref) for ref in refs] if isinstance(refs, (list, tuple)) and refs else None
         if all(name in prompt for name in ("x", "y", "w", "h")):
             item = dict(prompt)
             item["frame"] = int(prompt.get("frame", frame))
@@ -233,12 +247,15 @@ def _prompt_events(parsed: Mapping[str, Any], frame: int) -> list[dict[str, Any]
             points = prompt.get("points", [])
             labels = prompt.get("labels", [1] * len(points))
             if isinstance(labels, (list, tuple)) and len(points) == len(labels) and points:
-                events.append({
+                entry_pt: dict[str, Any] = {
                     "frame": int(prompt.get("frame", frame)),
                     "points": [[float(point[0]), float(point[1])] for point in points],
                     "labels": [int(label) for label in labels],
                     "prompt_type": "point",
-                })
+                }
+                if clean_refs:
+                    entry_pt["refinements"] = clean_refs
+                events.append(entry_pt)
                 explicit_frames.add(int(prompt.get("frame", frame)))
     frames = parsed.get("frames", {})
     if isinstance(frames, Mapping):
@@ -308,6 +325,12 @@ def _require_range(images: np.ndarray, seed: SAM3Seed, start: int, end: int) -> 
     return start, end
 
 
+def _has_prompt_on_frame(item: Mapping[str, Any], target_frame: int) -> bool:
+    if int(item.get("frame", target_frame)) == int(target_frame):
+        return True
+    return any(int(ref.get("frame", -1)) == int(target_frame) for ref in item.get("refinements", []))
+
+
 def calculate_frame(
     images: np.ndarray,
     parsed: Mapping[str, Any],
@@ -324,17 +347,29 @@ def calculate_frame(
     if not 0 <= frame < images.shape[0]:
         raise SAM3VideoError(f"SAM3 seed frame {frame} is outside this clip")
     prompts = _prompt_events(parsed, frame)
-    # Explicit top-level prompt is preferred; otherwise require a marked box on
-    # the requested frame.  This prevents an arbitrary brush rectangle from
-    # silently becoming a tracking anchor.
-    matching = [item for item in prompts if int(item.get("frame", frame)) == frame]
-    if not matching:
+    if not prompts or not any(_has_prompt_on_frame(item, frame) for item in prompts):
         meta = {"frame_ready": False, "track_ready": False, "frame": frame,
                 "seed_token": "", "direction": "forward", "computed_frames": [],
                 "error": "SAM3 frame calculation requires a marked box prompt on the selected frame"}
         raise SAM3VideoError(meta["error"], meta=meta)
-    event = matching[0]
-    box = _normal_box(event) if not isinstance(event.get("points"), (list, tuple)) else (0.0, 0.0, 1.0, 1.0)
+    selected_prompts = prompts if parsed.get("sam3", {}).get("objects") else prompts[:1]
+    matching = [item for item in selected_prompts if int(item.get("frame", frame)) == frame]
+    primary_event = matching[0] if matching else selected_prompts[0]
+    box = _normal_box(primary_event) if not isinstance(primary_event.get("points"), (list, tuple)) else (0.0, 0.0, 1.0, 1.0)
+    object_frames_expected = [int(item.get("frame", frame)) for item in selected_prompts]
+    for obj_frame in object_frames_expected:
+        if not 0 <= obj_frame < images.shape[0]:
+            raise SAM3VideoError(f"SAM3 object frame {obj_frame} is outside this clip")
+    refinements_on_frame = [
+        ref for item in selected_prompts
+        for ref in item.get("refinements", [])
+        if int(ref.get("frame", -1)) == frame
+    ]
+    keep_existing_mask = bool(
+        refinements_on_frame
+        and not any(f == frame for f in object_frames_expected)
+        and not any(1 in ref.get("labels", []) for ref in refinements_on_frame)
+    )
     source_digest = _source_digest(images, normalize=interactive)
     prompt_digest = _prompt_digest(prompts, frame)
     cache_identity = (source_digest, int(frame), prompt_digest, box)
@@ -343,38 +378,63 @@ def calculate_frame(
             if (cached.source_digest, cached.frame, cached.prompt_digest, cached.box) == cache_identity:
                 _SEED_CACHE.move_to_end(cached.token)
                 mask = np.asarray(cached.mask, dtype=bool).copy()
-                meta = {"frame_ready": True, "track_ready": False, "frame": frame,
-                        "seed_token": cached.token, "direction": "forward",
-                        "computed_frames": [frame]}
+                cached_obj_frames = list(cached.object_frames) if cached.object_frames else [frame]
+                computed_frames = sorted(set([frame] + cached_obj_frames))
+                meta: dict[str, Any] = {
+                    "frame_ready": True,
+                    "track_ready": False,
+                    "frame": frame,
+                    "seed_token": cached.token,
+                    "direction": "forward",
+                    "computed_frames": computed_frames,
+                }
+                if keep_existing_mask:
+                    meta["keep_existing_mask"] = True
                 return mask, cached, meta
-    selected_prompts = matching if parsed.get("sam3", {}).get("objects") else matching[:1]
     expected = tuple(int(value) for value in images[frame].shape[:2])
     with _CACHE_LOCK:
-        recent_masks = {
-            key: object_mask
-            for cached in _SEED_CACHE.values()
-            if cached.source_digest == source_digest and cached.frame == frame
-            for key, object_mask in cached.objects
-        }
+        recent_masks = {}
+        for cached in _SEED_CACHE.values():
+            if cached.source_digest != source_digest:
+                continue
+            for idx, (key, object_mask) in enumerate(cached.objects):
+                c_frame = cached.object_frames[idx] if idx < len(cached.object_frames) else cached.frame
+                recent_masks[(int(c_frame), key)] = object_mask
     try:
-        selected_image = images[frame]
-        if interactive:
-            selected_image = np.nan_to_num(selected_image.astype(np.float32, copy=False), nan=0.0, posinf=1.0, neginf=0.0)
+        options = {"keep_loaded": True} if interactive else {}
         object_masks = []
+        object_frames: list[int] = []
         mask = np.zeros(expected, dtype=bool)
         for index, item in enumerate(selected_prompts, start=1):
             _throw_interrupted()
-            key = _prompt_digest(({k: v for k, v in item.items() if k != "object_id"},), frame)
-            object_mask = recent_masks.get(key)
+            obj_frame = int(item.get("frame", frame))
+            primary_item = {k: v for k, v in item.items() if k not in ("object_id", "refinements")}
+            key = _prompt_digest((primary_item,), obj_frame)
+            object_mask = recent_masks.get((obj_frame, key))
             if object_mask is None:
-                options = {"keep_loaded": True} if interactive else {}
-                object_mask = np.asarray(_predict_native(selected_image, item, **options), dtype=bool)
+                obj_image = images[obj_frame]
+                if interactive:
+                    obj_image = np.nan_to_num(obj_image.astype(np.float32, copy=False), nan=0.0, posinf=1.0, neginf=0.0)
+                object_mask = np.asarray(_predict_native(obj_image, primary_item, **options), dtype=bool)
                 if object_mask.shape != expected or not bool(object_mask.any()):
                     raise SAM3VideoError(f"SAM3 object {index} returned an empty or invalid seed mask")
                 object_mask = object_mask.copy()
-                recent_masks[key] = object_mask
+                recent_masks[(obj_frame, key)] = object_mask
             object_masks.append((key, object_mask))
-            np.logical_or(mask, object_mask, out=mask)
+            object_frames.append(obj_frame)
+            if obj_frame == frame:
+                np.logical_or(mask, object_mask, out=mask)
+        if any(1 in ref.get("labels", []) for ref in refinements_on_frame):
+            selected_frame_img = images[frame]
+            if interactive:
+                selected_frame_img = np.nan_to_num(selected_frame_img.astype(np.float32, copy=False), nan=0.0, posinf=1.0, neginf=0.0)
+            for ref in refinements_on_frame:
+                if 1 not in ref.get("labels", []):
+                    continue
+                _throw_interrupted()
+                ref_mask = np.asarray(_predict_native(selected_frame_img, ref, **options), dtype=bool)
+                if ref_mask.shape == expected and bool(ref_mask.any()):
+                    np.logical_or(mask, ref_mask, out=mask)
         _throw_interrupted()
     except SAM3UnavailableError as exc:
         meta = {"frame_ready": False, "track_ready": False, "frame": frame,
@@ -383,15 +443,18 @@ def calculate_frame(
         raise SAM3VideoError(str(exc), meta=meta) from exc
     token = _seed_token(source_digest, frame, prompt_digest)
     seed = SAM3Seed(token, source_digest, tuple(int(v) for v in images.shape), frame,
-                    prompt_digest, box, mask, objects=tuple(object_masks))
+                    prompt_digest, box, mask, objects=tuple(object_masks), object_frames=tuple(object_frames))
     with _CACHE_LOCK:
         _SEED_CACHE[token] = seed
         _SEED_CACHE.move_to_end(token)
         while len(_SEED_CACHE) > int(MAX_SEEDS):
             _SEED_CACHE.popitem(last=False)
+    computed_frames = sorted(set([frame] + object_frames))
     meta = {"frame_ready": True, "track_ready": False, "frame": frame,
-            "seed_token": token, "direction": "forward", "computed_frames": [frame]}
+            "seed_token": token, "direction": "forward", "computed_frames": computed_frames}
     meta["seed_strategy"] = "native_image_prompt"
+    if keep_existing_mask:
+        meta["keep_existing_mask"] = True
     return np.asarray(mask, dtype=bool).copy(), seed, meta
 
 
@@ -600,16 +663,23 @@ def _native_track(
                     "SAM3 native tracker lacks add_new_mask(state, frame_idx, obj_id); "
                     "refusing a box-only seed that could change object identity"
                 )
-            seeds = [(index, mask) for index, (_, mask) in enumerate(seed.objects, start=1)] or [(seed.object_id, seed.mask)]
+            seeds = [
+                (
+                    index,
+                    int(seed.object_frames[index - 1]) if index - 1 < len(seed.object_frames) else int(seed.frame),
+                    object_mask,
+                )
+                for index, (_, object_mask) in enumerate(seed.objects, start=1)
+            ] or [(seed.object_id, int(seed.frame), seed.mask)]
             updated_states = {}
-            for object_id, object_mask in seeds:
+            for object_id, obj_frame, object_mask in seeds:
                 tracker_states = state_lookup(inference_state, [object_id])
                 if not tracker_states:
                     raise SAM3VideoError(f"SAM3 native tracker did not create selected object {object_id}")
                 tracker_state = tracker_states[0]
                 add_new_mask(
                     inference_state=tracker_state,
-                    frame_idx=int(seed.frame),
+                    frame_idx=int(obj_frame),
                     obj_id=object_id,
                     mask=torch.from_numpy(np.asarray(object_mask, dtype=np.float32)),
                 )
@@ -618,26 +688,66 @@ def _native_track(
             if callable(preflight):
                 for tracker_state in updated_states.values():
                     preflight(tracker_state, run_mem_encoder=True)
+
+            if any(item.get("refinements") for item in prompts):
+                prepare_feats = getattr(native_video_model, "_prepare_backbone_feats", None)
+                add_new_points = getattr(tracker, "add_new_points", None)
+                refined_states = {}
+                for item in prompts:
+                    object_id = int(item.get("object_id", seed.object_id))
+                    for ref in item.get("refinements", []):
+                        r_frame = int(ref.get("frame", seed.frame))
+                        if not int(start) <= r_frame <= int(end):
+                            continue
+                        if callable(prepare_feats):
+                            prepare_feats(inference_state, r_frame, False)
+                        tracker_states = state_lookup(inference_state, [object_id])
+                        if not tracker_states or not callable(add_new_points):
+                            continue
+                        tracker_state = tracker_states[0]
+                        add_new_points(
+                            inference_state=tracker_state,
+                            frame_idx=r_frame,
+                            obj_id=object_id,
+                            points=ref["points"],
+                            labels=ref["labels"],
+                            clear_old_points=True,
+                            rel_coordinates=True,
+                            use_prev_mem_frame=True,
+                        )
+                        refined_states[id(tracker_state)] = tracker_state
+                if callable(preflight):
+                    for tracker_state in refined_states.values():
+                        preflight(tracker_state, run_mem_encoder=True)
+
             _LAST_NATIVE_SEED_STRATEGY = "native_tracker_add_new_mask"
-            spans: list[tuple[str, int]] = []
+            prompt_frames = sorted({
+                f for f in (
+                    [int(item.get("frame", seed.frame)) for item in prompts]
+                    + [int(ref["frame"]) for item in prompts for ref in item.get("refinements", [])]
+                )
+                if int(start) <= f <= int(end)
+            }) or [int(seed.frame)]
+            min_f, max_f = prompt_frames[0], prompt_frames[-1]
+            spans: list[tuple[str, int, int]] = []
             if direction in {"forward", "both"}:
-                spans.append(("forward", max(0, int(end) - seed.frame)))
+                spans.append(("forward", min_f, max(0, int(end) - min_f)))
             if direction in {"backward", "both"}:
-                spans.append(("backward", max(0, seed.frame - int(start))))
-            progress_start = int(seed.frame) if direction == "forward" else int(start)
-            progress_end = int(seed.frame) if direction == "backward" else int(end)
+                spans.append(("backward", max_f, max(0, max_f - int(start))))
+            progress_start = min_f if direction == "forward" else int(start)
+            progress_end = max_f if direction == "backward" else int(end)
             report = frame_progress("sam3_track", progress_end - progress_start + 1)
-            completed = {int(seed.frame)}
+            completed = set(prompt_frames)
             report(len(completed))
-            object_ids = [object_id for object_id, _ in seeds]
+            object_ids = [object_id for object_id, _, _ in seeds]
             shape = tuple(int(v) for v in images.shape[1:3])
-            for request_direction, span in spans:
+            for request_direction, start_idx, span in spans:
                 _throw_interrupted()
                 request = {
                     "type": "propagate_in_video",
                     "session_id": video_state.session_uuid,
                     "propagation_direction": request_direction,
-                    "start_frame_index": int(seed.frame),
+                    "start_frame_index": int(start_idx),
                     "max_frame_num_to_track": int(span),
                 }
                 for response in model.handle_stream_request(request):
@@ -728,6 +838,14 @@ def track_video(
                 meta["cache_hit"] = True
                 meta.update(sam3_video_cache_info())
                 return SAM3VideoResult(restored.copy(), restored, anchors, meta)
+        prompt_frames = sorted({
+            f for f in (
+                [int(item.get("frame", seed.frame)) for item in prompts]
+                + [int(ref["frame"]) for item in prompts for ref in item.get("refinements", [])]
+            )
+            if int(start) <= f <= int(end)
+        }) or [int(seed.frame)]
+        min_f, max_f = prompt_frames[0], prompt_frames[-1]
         raw = np.zeros(images.shape[:3], dtype=np.float32)
         raw[seed.frame] = np.asarray(seed.mask, dtype=np.float32)
         try:
@@ -745,20 +863,32 @@ def track_video(
                 raw[index] = np.clip(value, 0.0, 1.0)
         # Keep the visible seed pixel-identical even when the native stream
         # omits the prompted frame or returns a postprocessed variant.
-        raw[seed.frame] = np.asarray(seed.mask, dtype=np.float32)
+        if len(set(seed.object_frames or (seed.frame,))) <= 1 and len(prompt_frames) <= 1:
+            raw[seed.frame] = np.asarray(seed.mask, dtype=np.float32)
+        else:
+            seed_entries = [
+                (
+                    int(seed.object_frames[idx]) if idx < len(seed.object_frames) else int(seed.frame),
+                    obj_mask,
+                )
+                for idx, (_, obj_mask) in enumerate(seed.objects)
+            ] or [(int(seed.frame), seed.mask)]
+            for obj_frame, obj_mask in seed_entries:
+                if start <= obj_frame <= end:
+                    raw[obj_frame] = np.maximum(raw[obj_frame], np.asarray(obj_mask, dtype=np.float32))
         # Native tracking is the only anchor source.  Browser brush/erase
         # events are applied by mask_core after this immutable raw result is
         # cached, so a local edit never becomes a hidden tracker prompt.
         edit_bases = raw
-        anchors = frozenset({seed.frame})
+        anchors = frozenset(prompt_frames)
         if direction == "forward":
-            requested = set(range(seed.frame, end + 1))
+            requested = set(range(min_f, end + 1))
         elif direction == "backward":
-            requested = set(range(start, seed.frame + 1))
+            requested = set(range(start, max_f + 1))
         else:
             requested = set(range(start, end + 1))
         covered = set(int(index) for index in native if start <= int(index) <= end)
-        covered.add(int(seed.frame))
+        covered.update(prompt_frames)
         empty_frames = sorted(
             int(index)
             for index, value in native.items()

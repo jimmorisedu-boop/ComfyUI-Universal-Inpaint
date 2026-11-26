@@ -437,3 +437,210 @@ def test_all_frame_cache_uses_temp_descriptors_and_isolates_sessions(tmp_path, m
     assert second_info["available"] is True
     assert second_info["session"] != info["session"]
     assert second[0]["subfolder"] != first["subfolder"]
+
+
+def test_parse_mask_data_layers_validation_and_v1_compat():
+    from ths_universal_inpaint.mask_core import MAX_MASK_LAYERS
+
+    legacy = parse_mask_data({"frames": {"0": {"events": [{"type": "rect", "mode": "add", "x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}]}}})
+    assert "layers" not in legacy and "active_layer_id" not in legacy
+
+    multi = parse_mask_data(
+        {
+            "layers": [
+                {
+                    "id": "layer-1",
+                    "name": "SAM3",
+                    "type": "sam3",
+                    "blend": "add",
+                    "enabled": True,
+                    "start_frame": 0,
+                    "end_frame": 3,
+                    "sam3": {"action": "frame", "frame": 1, "direction": "both", "prompt": {"frame": 1, "points": [[0.2, 0.2]], "labels": [1]}},
+                    "frames": {},
+                },
+                {
+                    "id": "layer-2",
+                    "name": "Статика",
+                    "type": "static",
+                    "blend": "subtract",
+                    "enabled": True,
+                    "start_frame": 1,
+                    "end_frame": -1,
+                    "frames": {"0": {"events": [{"type": "rect", "mode": "add", "x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2}]}},
+                },
+            ],
+            "active_layer_id": "layer-2",
+        },
+        frame_count=4,
+    )
+    assert len(multi["layers"]) == 2
+    assert multi["active_layer_id"] == "layer-2"
+    assert multi["tracking_mode"] == "static"
+    assert multi["layers"][0]["type"] == "sam3"
+    assert multi["layers"][1]["blend"] == "subtract"
+
+    # Defaults active_layer_id to first layer when omitted.
+    default_active = parse_mask_data({"layers": [{"id": "a", "type": "static", "frames": {}}]})
+    assert default_active["active_layer_id"] == "a"
+
+    # Validation failures.
+    for bad in (
+        {"layers": []},
+        {"layers": [{"id": f"l-{i}", "type": "static", "frames": {}} for i in range(MAX_MASK_LAYERS + 1)]},
+        {"layers": [{"id": "dup", "type": "static", "frames": {}}, {"id": "dup", "type": "static", "frames": {}}]},
+        {"layers": [{"id": "a", "type": "unknown", "frames": {}}]},
+        {"layers": [{"id": "a", "type": "static", "blend": "xor", "frames": {}}]},
+        {"layers": [{"id": "a", "type": "static", "frames": {}}], "active_layer_id": "missing"},
+    ):
+        with pytest.raises(MaskDataError):
+            parse_mask_data(bad)
+
+
+def test_build_mask_sequence_multilayer_compositing_and_independent_cache(monkeypatch):
+    import ths_universal_inpaint.mask_core as core
+    import ths_universal_inpaint.mask_sam3_video as video
+
+    core.clear_raw_tracking_cache()
+    video.clear_sam3_video_cache()
+    images = _clip(frames=4, height=40, width=60)
+    track_calls = []
+
+    def fake_predict(image, event):
+        out = np.zeros(images.shape[1:3], dtype=bool)
+        out[5:20, 5:25] = True
+        return out
+
+    def fake_track(imgs, prompts, *, seed, start, end, direction):
+        track_calls.append((start, end, direction))
+        out = np.zeros(imgs.shape[1:3], dtype=bool)
+        out[5:20, 5:25] = True
+        return {idx: out.copy() for idx in range(start, end + 1)}
+
+    monkeypatch.setattr(video, "_predict_native", fake_predict)
+    monkeypatch.setattr(video, "_native_track", fake_track)
+
+    sam3_seed_doc = {
+        "tracking_mode": "sam3",
+        "sam3": {"action": "frame", "frame": 0, "direction": "both", "prompt": {"frame": 0, "points": [[0.2, 0.2]], "labels": [1]}},
+        "frames": {},
+    }
+    _, _, _, _, seed_meta = core.build_mask_sequence(
+        images, sam3_seed_doc, tracking_mode="sam3", grow=0, feather=0, return_edit_bases=True, return_sam3_meta=True
+    )
+    token = seed_meta["seed_token"]
+
+    # Pass 1: SAM3 (+) union Static (+), across distinct ranges.
+    doc_union = {
+        "layers": [
+            {
+                "id": "l-sam3",
+                "type": "sam3",
+                "blend": "add",
+                "enabled": True,
+                "start_frame": 0,
+                "end_frame": 3,
+                "sam3": {"action": "track", "frame": 0, "direction": "both", "seed_token": token, "prompt": {"frame": 0, "points": [[0.2, 0.2]], "labels": [1]}},
+                "frames": {},
+            },
+            {
+                "id": "l-static",
+                "type": "static",
+                "blend": "add",
+                "enabled": True,
+                "start_frame": 2,
+                "end_frame": 3,
+                "frames": {"0": {"events": [{"type": "rect", "mode": "add", "x": 0.6, "y": 0.5, "w": 0.25, "h": 0.3}]}},
+            },
+        ],
+        "active_layer_id": "l-static",
+    }
+    union_mask, _, _, _, _, _, layers_meta = core.build_mask_sequence(
+        images, doc_union, tracking_mode="static", grow=0, feather=0, return_edit_bases=True, return_sam3_meta=True, return_raw_mask=True, return_layers_meta=True
+    )
+    assert len(track_calls) == 1
+    assert len(layers_meta) == 2 and all(item["has_mask"] for item in layers_meta)
+    assert float(union_mask[0, 10, 10]) == 1.0  # SAM3 active on frame 0
+    assert float(union_mask[0, 25, 42]) == 0.0  # Static inactive on frame 0 (start_frame=2)
+    assert float(union_mask[2, 25, 42]) == 1.0  # Static active on frame 2
+
+    # Pass 2: Add Static subtract layer carving into SAM3 region without re-running native SAM3 track.
+    before_hits = core.raw_tracking_cache_info()["hits"]
+    doc_sub = {
+        "layers": [
+            doc_union["layers"][0],
+            doc_union["layers"][1],
+            {
+                "id": "l-cut",
+                "type": "static",
+                "blend": "subtract",
+                "enabled": True,
+                "start_frame": 0,
+                "end_frame": 3,
+                "frames": {"0": {"events": [{"type": "rect", "mode": "add", "x": 10 / 59, "y": 8 / 39, "w": 8 / 59, "h": 8 / 39}]}},
+            },
+        ],
+        "active_layer_id": "l-cut",
+    }
+    sub_mask, _, _ = core.build_mask_sequence(images, doc_sub, tracking_mode="static", grow=0, feather=0)
+    assert len(track_calls) == 1, "SAM3 video cache reused without a second native track run"
+    assert core.raw_tracking_cache_info()["hits"] > before_hits, "l-static layer hits per-layer tracking cache"
+    assert float(sub_mask[1, 12, 14]) == 0.0, "subtract layer cuts hole inside SAM3 region"
+    assert float(sub_mask[1, 6, 6]) == 1.0, "uncut SAM3 pixel stays masked"
+
+    # Intersect + disabled layer + single postprocess pass after composite.
+    doc_intersect = {
+        "layers": [
+            {
+                "id": "l-base",
+                "type": "static",
+                "blend": "add",
+                "enabled": True,
+                "frames": {"0": {"events": [{"type": "rect", "mode": "add", "x": 0.1, "y": 0.1, "w": 0.6, "h": 0.6}]}},
+            },
+            {
+                "id": "l-gate",
+                "type": "keyframes",
+                "blend": "intersect",
+                "enabled": True,
+                "frames": {"0": {"events": [{"type": "rect", "mode": "add", "x": 0.3, "y": 0.3, "w": 0.5, "h": 0.5}]}},
+            },
+            {
+                "id": "l-off",
+                "type": "static",
+                "blend": "add",
+                "enabled": False,
+                "frames": {"0": {"events": [{"type": "rect", "mode": "add", "x": 0.85, "y": 0.05, "w": 0.1, "h": 0.1}]}},
+            },
+        ],
+        "active_layer_id": "l-gate",
+    }
+    inter_mask, _, _ = core.build_mask_sequence(images, doc_intersect, tracking_mode="keyframes", grow=0, feather=0)
+    assert float(inter_mask[0, 6, 8]) == 0.0, "outside intersection is zero"
+    assert float(inter_mask[0, 20, 25]) == 1.0, "inside intersection is one"
+    assert float(inter_mask[0, 3, 55]) == 0.0, "disabled layer does not contribute"
+
+    grown_mask, _, _, grown_raw = core.build_mask_sequence(
+        images, doc_intersect, tracking_mode="keyframes", grow=3, feather=2, return_raw_mask=True
+    )
+    assert float(grown_raw[0, 10, 25]) == 0.0
+    assert float(grown_mask[0, 10, 25]) > 0.0, "postprocess grow/feather applies to combined composite"
+
+
+def test_encode_preview_assets_optional_edit_base_and_raw_mask():
+    from ths_universal_inpaint.mask_core import encode_preview_assets
+
+    images = np.zeros((3, 16, 16, 3), dtype=np.float32)
+    masks = np.zeros((3, 16, 16), dtype=np.float32)
+    edit_bases = np.zeros((3, 16, 16), dtype=np.float32)
+    raw_masks = np.zeros((3, 16, 16), dtype=np.float32)
+
+    compact = encode_preview_assets(images, masks)
+    assert len(compact) == 3
+    assert "edit_base" not in compact[0] and "raw_mask" not in compact[0]
+
+    fallback = encode_preview_assets(images, masks, edit_bases=edit_bases, raw_masks=raw_masks)
+    assert len(fallback) == 3
+    assert fallback[0]["edit_base"].startswith("data:image/png;base64,")
+    assert fallback[0]["raw_mask"].startswith("data:image/png;base64,")
+

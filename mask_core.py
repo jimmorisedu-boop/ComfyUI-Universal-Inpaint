@@ -60,6 +60,16 @@ MAX_POINTS = 65536
 MAX_POINTS_PER_EVENT = 4096
 MAX_SAM3_OBJECTS = 8
 MAX_SAM3_OBJECT_POINTS = 64
+MAX_SAM3_REFINEMENT_FRAMES = 32
+MAX_MASK_LAYERS = 16
+_LAYER_TYPES = ("sam3", "optical_flow", "keyframes", "static")
+_LAYER_BLENDS = ("add", "subtract", "intersect")
+_LAYER_TYPE_NAMES = {
+    "sam3": "SAM3",
+    "optical_flow": "Optical Flow",
+    "keyframes": "Ключи",
+    "static": "Статика",
+}
 MAX_PREVIEW_FRAMES = 48
 MAX_PREVIEW_SIZE = 640
 MAX_FLOW_DIM = 960
@@ -746,10 +756,16 @@ def restore_crop_window(
         touch_bottom=(bottom == orig_h),
     )
     blend_c = min(orig_c, crop_c)
+    crop_full_timeline = crop_t == orig_t and orig_t > 1
 
     for step in range(write_count):
         orig_idx = start_frame + step
-        crop_idx = 0 if crop_t == 1 else step
+        if crop_t == 1:
+            crop_idx = 0
+        elif crop_full_timeline:
+            crop_idx = orig_idx
+        else:
+            crop_idx = step
 
         crop_patch = _resize_hw(crop[crop_idx], target_h, target_w, method=resize_method)
         orig_patch = output[orig_idx, top:bottom, left:right, :blend_c]
@@ -760,7 +776,7 @@ def restore_crop_window(
             t_mask = mask_arr.shape[0]
             if t_mask == 1:
                 m_idx = 0
-            elif mask_is_full and t_mask == orig_t:
+            elif t_mask == orig_t:
                 m_idx = orig_idx
             else:
                 m_idx = min(step, t_mask - 1)
@@ -809,33 +825,77 @@ def _sam3_prompt(prompt: Any, frame: int, frame_count: int | None, label: str) -
     if not isinstance(prompt, Mapping):
         raise MaskDataError(f"{label} must be an object")
     prompt_frame = _frame_number(prompt.get("frame", frame), frame_count, f"{label}.frame")
+    if prompt_frame < 0:
+        raise MaskDataError(f"{label}.frame must be >= 0")
     if all(name in prompt for name in ("x", "y", "w", "h")):
         box = {name: _finite_unit(prompt[name], f"{label}.{name}") for name in ("x", "y", "w", "h")}
         if box["w"] <= 0 or box["h"] <= 0:
             raise MaskDataError(f"{label} width and height must be positive")
         if box["x"] + box["w"] > 1.0 or box["y"] + box["h"] > 1.0:
             raise MaskDataError(f"{label} extends outside [0, 1]")
-        return {**box, "frame": prompt_frame}
-    points = _points(prompt.get("points"), f"{label}.points")
-    labels = prompt.get("labels", [1] * len(points))
-    if not isinstance(labels, (list, tuple)) or len(labels) != len(points):
-        raise MaskDataError(f"{label}.labels must match points")
-    if any(isinstance(item, bool) or not isinstance(item, (int, float)) or item not in (0, 1) for item in labels):
-        raise MaskDataError(f"{label}.labels must be 0 or 1")
-    return {"points": points, "labels": [int(item) for item in labels], "frame": prompt_frame}
+        parsed_prompt: dict[str, Any] = {**box, "frame": prompt_frame}
+        total_points = 0
+    else:
+        points = _points(prompt.get("points"), f"{label}.points")
+        labels = prompt.get("labels", [1] * len(points))
+        if not isinstance(labels, (list, tuple)) or len(labels) != len(points):
+            raise MaskDataError(f"{label}.labels must match points")
+        if any(isinstance(item, bool) or not isinstance(item, (int, float)) or item not in (0, 1) for item in labels):
+            raise MaskDataError(f"{label}.labels must be 0 or 1")
+        parsed_prompt = {"points": points, "labels": [int(item) for item in labels], "frame": prompt_frame}
+        total_points = len(points)
+
+    refinements_raw = prompt.get("refinements")
+    if refinements_raw is not None:
+        if not isinstance(refinements_raw, (list, tuple)):
+            raise MaskDataError(f"{label}.refinements must be a list")
+        if len(refinements_raw) > MAX_SAM3_REFINEMENT_FRAMES:
+            raise MaskDataError(f"{label}.refinements exceeds maximum ({MAX_SAM3_REFINEMENT_FRAMES})")
+        seen_frames: set[int] = set()
+        refinements: list[dict[str, Any]] = []
+        for index, entry in enumerate(refinements_raw):
+            r_label = f"{label}.refinements[{index}]"
+            if not isinstance(entry, Mapping):
+                raise MaskDataError(f"{r_label} must be an object")
+            if "frame" not in entry:
+                raise MaskDataError(f"{r_label}.frame is required")
+            r_frame = _frame_number(entry.get("frame"), frame_count, f"{r_label}.frame")
+            if r_frame < 0:
+                raise MaskDataError(f"{r_label}.frame must be >= 0")
+            if r_frame == prompt_frame:
+                raise MaskDataError(f"{r_label}.frame must differ from primary object frame {prompt_frame}")
+            if r_frame in seen_frames:
+                raise MaskDataError(f"{r_label}.frame duplicates frame {r_frame}")
+            seen_frames.add(r_frame)
+            r_points = _points(entry.get("points"), f"{r_label}.points")
+            r_labels = entry.get("labels", [1] * len(r_points))
+            if not isinstance(r_labels, (list, tuple)) or len(r_labels) != len(r_points):
+                raise MaskDataError(f"{r_label}.labels must match points")
+            if any(isinstance(val, bool) or not isinstance(val, (int, float)) or val not in (0, 1) for val in r_labels):
+                raise MaskDataError(f"{r_label}.labels must be 0 or 1")
+            total_points += len(r_points)
+            refinements.append({
+                "frame": r_frame,
+                "points": r_points,
+                "labels": [int(val) for val in r_labels],
+            })
+        if total_points > MAX_SAM3_OBJECT_POINTS:
+            raise MaskDataError(f"SAM3 object exceeds maximum {MAX_SAM3_OBJECT_POINTS} points")
+        if refinements:
+            refinements.sort(key=lambda item: item["frame"])
+            parsed_prompt["refinements"] = refinements
+
+    return parsed_prompt
 
 
-def parse_mask_data(value: Any, frame_count: int | None = None, *, width: int | None = None,
-                    height: int | None = None, fingerprint: str | None = None) -> dict[str, Any]:
-    """Validate and canonicalize the browser's normalized edit document.
-
-    The parser accepts a compact top-level ``edits`` list for imported masks,
-    while returning only the stable frame-grouped representation used by the
-    node and browser.  ``source`` is optional for hand-authored data, but when
-    present its frame count and dimensions must match the current clip.
-    """
-
-    raw = _json_value(value)
+def _parse_declared_source(
+    raw: Mapping[str, Any],
+    frame_count: int | None,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+    fingerprint: str | None = None,
+) -> dict[str, Any]:
     source = raw.get("source") if isinstance(raw.get("source"), Mapping) else {}
     declared_frames = source.get("frames", source.get("frame_count", source.get("count")))
     declared_width = source.get("width")
@@ -891,7 +951,23 @@ def parse_mask_data(value: Any, frame_count: int | None = None, *, width: int | 
             previous_source,
             "mask_data belongs to a different source clip",
         )
+    canonical_source: dict[str, Any] = {}
+    if declared_frames is not None:
+        canonical_source["frames"] = int(declared_frames)
+    if declared_width is not None:
+        canonical_source["width"] = int(declared_width)
+    if declared_height is not None:
+        canonical_source["height"] = int(declared_height)
+    if declared_fingerprint is not None:
+        canonical_source["fingerprint"] = str(declared_fingerprint)
+    return canonical_source
 
+def _parse_frame_payload(
+    raw: Mapping[str, Any],
+    frame_count: int | None,
+    *,
+    label_prefix: str = "",
+) -> tuple[dict[str, dict[str, Any]], list[int], int, int]:
     frames: dict[int, dict[str, Any]] = {}
     total_events = 0
     total_points = 0
@@ -908,7 +984,7 @@ def parse_mask_data(value: Any, frame_count: int | None = None, *, width: int | 
                 bucket["inherit"] = inherit
                 bucket["inherit_present"] = True
             # The editor emits this list when a frame mixes tools.  It is the
-            # only representation that preserves rectangle→erase→polygon
+            # only representation that preserves rectangle->erase->polygon
             # order; grouped legacy fields are intentionally skipped when it
             # is present to avoid applying events twice.
             if "events" in payload:
@@ -955,25 +1031,25 @@ def parse_mask_data(value: Any, frame_count: int | None = None, *, width: int | 
     if grouped is None:
         grouped = {}
     if not isinstance(grouped, Mapping):
-        raise MaskDataError("mask_data.frames must be an object keyed by frame number")
+        raise MaskDataError(f"mask_data.{label_prefix}frames must be an object keyed by frame number")
     for key, payload in grouped.items():
         frame_key: Any = key
         if isinstance(key, str) and key.strip():
             try:
                 frame_key = int(key)
             except ValueError as exc:
-                raise MaskDataError(f"frames key {key!r} must be an integer") from exc
-        ingest(frame_key, payload, f"frames[{key!r}]")
+                raise MaskDataError(f"{label_prefix}frames key {key!r} must be an integer") from exc
+        ingest(frame_key, payload, f"{label_prefix}frames[{key!r}]")
 
     # Imported compact records: each record has a frame field and type.
     edits = raw.get("edits", [])
     if edits is not None:
         if not isinstance(edits, (list, tuple)):
-            raise MaskDataError("mask_data.edits must be a list")
+            raise MaskDataError(f"mask_data.{label_prefix}edits must be a list")
         for index, event in enumerate(edits):
             if not isinstance(event, Mapping) or "frame" not in event:
-                raise MaskDataError(f"edits[{index}] must include frame")
-            ingest(event["frame"], [event], f"edits[{index}]")
+                raise MaskDataError(f"{label_prefix}edits[{index}] must include frame")
+            ingest(event["frame"], [event], f"{label_prefix}edits[{index}]")
 
     # ``keys``/``keyframes`` are accepted as aliases for grouped frame data;
     # their explicit frame list is retained below to keep anchor intent clear.
@@ -981,17 +1057,17 @@ def parse_mask_data(value: Any, frame_count: int | None = None, *, width: int | 
     anchors = raw.get("anchors", raw.get("keyframes", raw.get("keys", [])))
     if anchors is not None:
         if not isinstance(anchors, (list, tuple)):
-            raise MaskDataError("mask_data.anchors must be a list")
+            raise MaskDataError(f"mask_data.{label_prefix}anchors must be a list")
         for index, item in enumerate(anchors):
             if isinstance(item, Mapping):
                 if "frame" not in item:
-                    raise MaskDataError(f"anchors[{index}] is missing frame")
-                frame = _frame_number(item["frame"], frame_count, f"anchors[{index}].frame")
+                    raise MaskDataError(f"{label_prefix}anchors[{index}] is missing frame")
+                frame = _frame_number(item["frame"], frame_count, f"{label_prefix}anchors[{index}].frame")
                 explicit_anchors.append(frame)
                 if any(key in item for key in ("inherit", "events", "strokes", "rects", "rectangles", "polygons", "edits")):
-                    ingest(frame, item, f"anchors[{index}]")
+                    ingest(frame, item, f"{label_prefix}anchors[{index}]")
             else:
-                explicit_anchors.append(_frame_number(item, frame_count, f"anchors[{index}]"))
+                explicit_anchors.append(_frame_number(item, frame_count, f"{label_prefix}anchors[{index}]"))
 
     if total_events > MAX_EVENTS:
         raise MaskDataError(f"mask_data has too many edit events ({total_events})")
@@ -1011,70 +1087,211 @@ def parse_mask_data(value: Any, frame_count: int | None = None, *, width: int | 
             if bucket.get("inherit_present"):
                 canonical_bucket["inherit"] = bool(bucket.get("inherit"))
             canonical_frames[str(frame)] = canonical_bucket
-    canonical_source: dict[str, Any] = {}
-    if declared_frames is not None:
-        canonical_source["frames"] = int(declared_frames)
-    if declared_width is not None:
-        canonical_source["width"] = int(declared_width)
-    if declared_height is not None:
-        canonical_source["height"] = int(declared_height)
-    if declared_fingerprint is not None:
-        canonical_source["fingerprint"] = str(declared_fingerprint)
-    result: dict[str, Any] = {"version": 1, "frames": canonical_frames}
+    return canonical_frames, sorted(set(explicit_anchors)), total_events, total_points
+
+
+def _parse_sam3_config(
+    sam3_raw: Any,
+    frame_count: int | None,
+    *,
+    label_prefix: str = "",
+) -> dict[str, Any]:
+    if not isinstance(sam3_raw, Mapping):
+        raise MaskDataError(f"mask_data.{label_prefix}sam3 must be an object")
+    action = str(sam3_raw.get("action", "frame"))
+    if action not in {"frame", "track"}:
+        raise MaskDataError(f"mask_data.{label_prefix}sam3.action must be 'frame' or 'track'")
+    frame = _frame_number(sam3_raw.get("frame", 0), frame_count, f"{label_prefix}sam3.frame")
+    direction = str(sam3_raw.get("direction", "forward"))
+    if direction not in {"forward", "backward", "both"}:
+        raise MaskDataError(f"mask_data.{label_prefix}sam3.direction must be forward, backward, or both")
+    token = sam3_raw.get("seed_token", "")
+    if token is None:
+        token = ""
+    if not isinstance(token, (str, int, float)) or isinstance(token, bool):
+        raise MaskDataError(f"mask_data.{label_prefix}sam3.seed_token must be a string")
+    token = str(token)
+    if len(token) > 256:
+        raise MaskDataError(f"mask_data.{label_prefix}sam3.seed_token is too long")
+    sam3: dict[str, Any] = {
+        "action": action,
+        "frame": frame,
+        "direction": direction,
+        "seed_token": token,
+    }
+    def _total_sam3_points(entry: Mapping[str, Any]) -> int:
+        total = len(entry.get("points", [])) if isinstance(entry.get("points"), list) else 0
+        for ref in entry.get("refinements", []):
+            total += len(ref.get("points", []))
+        return total
+
+    prompt = sam3_raw.get("prompt")
+    objects = sam3_raw.get("objects")
+    if prompt is not None:
+        sam3["prompt"] = _sam3_prompt(prompt, frame, frame_count, f"{label_prefix}sam3.prompt")
+        if _total_sam3_points(sam3["prompt"]) > MAX_SAM3_OBJECT_POINTS:
+            raise MaskDataError(
+                f"SAM3 object requires a positive point and at most {MAX_SAM3_OBJECT_POINTS} points"
+            )
+    if objects is not None:
+        if prompt is not None or not isinstance(objects, list) or not 1 <= len(objects) <= MAX_SAM3_OBJECTS:
+            raise MaskDataError(
+                f"{label_prefix}sam3.objects must contain 1–{MAX_SAM3_OBJECTS} objects and replaces sam3.prompt"
+            )
+        sam3["objects"] = [
+            _sam3_prompt(item, frame, frame_count, f"{label_prefix}sam3.objects[{index}]")
+            for index, item in enumerate(objects)
+        ]
+        for item in sam3["objects"]:
+            if ("points" in item and 1 not in item["labels"]) or _total_sam3_points(item) > MAX_SAM3_OBJECT_POINTS:
+                raise MaskDataError(
+                    f"SAM3 object requires a positive point and at most {MAX_SAM3_OBJECT_POINTS} points"
+                )
+    return sam3
+
+
+def _layer_bound_int(value: Any, name: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or int(value) != value:
+        raise MaskDataError(f"{name} must be an integer")
+    int_val = int(value)
+    if int_val < minimum or int_val > maximum:
+        raise MaskDataError(f"{name} must be between {minimum} and {maximum}")
+    return int_val
+
+
+def _parse_layers(
+    layers_raw: Any,
+    raw: Mapping[str, Any],
+    frame_count: int | None,
+) -> tuple[list[dict[str, Any]], str]:
+    if not isinstance(layers_raw, list) or not 1 <= len(layers_raw) <= MAX_MASK_LAYERS:
+        raise MaskDataError(f"mask_data.layers must be a list of 1–{MAX_MASK_LAYERS} layer objects")
+
+    parsed_layers: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    cum_events = 0
+    cum_points = 0
+
+    for idx, item in enumerate(layers_raw):
+        if not isinstance(item, Mapping):
+            raise MaskDataError(f"mask_data.layers[{idx}] must be an object")
+
+        raw_id = item.get("id", f"layer-{idx + 1}")
+        if not isinstance(raw_id, str) or not 1 <= len(raw_id.strip()) <= 64:
+            raise MaskDataError(f"mask_data.layers[{idx}].id must be a 1–64 character string")
+        layer_id = raw_id.strip()
+        if layer_id in seen_ids:
+            raise MaskDataError(f"Duplicate mask layer id: {layer_id!r}")
+        seen_ids.add(layer_id)
+
+        layer_type = str(item.get("type", ""))
+        if layer_type not in _LAYER_TYPES:
+            raise MaskDataError(f"mask_data.layers[{idx}].type must be one of {_LAYER_TYPES}")
+
+        blend = str(item.get("blend", "add"))
+        if blend not in _LAYER_BLENDS:
+            raise MaskDataError(f"mask_data.layers[{idx}].blend must be one of {_LAYER_BLENDS}")
+
+        enabled = item.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise MaskDataError(f"mask_data.layers[{idx}].enabled must be a boolean")
+
+        raw_name = item.get("name", _LAYER_TYPE_NAMES[layer_type])
+        if not isinstance(raw_name, str) or len(raw_name) > 64:
+            raise MaskDataError(f"mask_data.layers[{idx}].name must be a string up to 64 characters")
+        name = raw_name.strip() or _LAYER_TYPE_NAMES[layer_type]
+
+        start_val = _layer_bound_int(item.get("start_frame", 0), f"layers[{idx}].start_frame", 0, MAX_FRAMES)
+        end_val = _layer_bound_int(item.get("end_frame", -1), f"layers[{idx}].end_frame", -1, MAX_FRAMES)
+
+        l_frames, l_anchors, l_events, l_points = _parse_frame_payload(
+            item, frame_count, label_prefix=f"layers[{idx}]."
+        )
+        cum_events += l_events
+        cum_points += l_points
+        if cum_events > MAX_EVENTS:
+            raise MaskDataError(f"mask_data has too many edit events ({cum_events})")
+        if cum_points > MAX_POINTS:
+            raise MaskDataError(f"mask_data has too many points ({cum_points})")
+
+        layer_entry: dict[str, Any] = {
+            "id": layer_id,
+            "name": name,
+            "type": layer_type,
+            "blend": blend,
+            "enabled": enabled,
+            "start_frame": start_val,
+            "end_frame": end_val,
+            "frames": l_frames,
+        }
+        if l_anchors:
+            layer_entry["anchors"] = l_anchors
+        if layer_type == "sam3" and item.get("sam3") is not None:
+            layer_entry["sam3"] = _parse_sam3_config(item["sam3"], frame_count, label_prefix=f"layers[{idx}].")
+        parsed_layers.append(layer_entry)
+
+    active_raw = raw.get("active_layer_id")
+    if active_raw is not None:
+        if not isinstance(active_raw, str) or active_raw not in seen_ids:
+            raise MaskDataError("mask_data.active_layer_id must reference one of mask_data.layers[].id")
+        active_id = active_raw
+    else:
+        active_id = parsed_layers[0]["id"]
+    return parsed_layers, active_id
+
+
+def parse_mask_data(value: Any, frame_count: int | None = None, *, width: int | None = None,
+                    height: int | None = None, fingerprint: str | None = None) -> dict[str, Any]:
+    """Validate and canonicalize the browser's normalized edit document.
+
+    The parser accepts a compact top-level ``edits`` list for imported masks,
+    while returning only the stable frame-grouped representation used by the
+    node and browser.  ``source`` is optional for hand-authored data, but when
+    present its frame count and dimensions must match the current clip.
+    Multi-layer documents (``layers``) are validated independently per layer and
+    mirrored onto top-level ``frames`` / ``tracking_mode`` / ``sam3``.
+    """
+
+    raw = _json_value(value)
+    canonical_source = _parse_declared_source(
+        raw, frame_count, width=width, height=height, fingerprint=fingerprint
+    )
+    layers_raw = raw.get("layers")
+    result: dict[str, Any] = {"version": 1, "frames": {}}
     if canonical_source:
         result["source"] = canonical_source
-    if explicit_anchors:
-        result["anchors"] = sorted(set(explicit_anchors))
-    if raw.get("tracking_mode") is not None:
-        mode = str(raw["tracking_mode"])
-        if mode not in {"optical_flow", "static", "keyframes", "sam3"}:
-            raise MaskDataError("tracking_mode must be optical_flow, static, keyframes, or sam3")
-        result["tracking_mode"] = mode
-    # Stateful SAM3 video control is deliberately explicit and source-bound.
-    # Keep the small action/frame/direction/token contract in canonical data;
-    # unknown fields are not allowed to influence cache identity or tracking.
-    sam3_raw = raw.get("sam3")
-    if sam3_raw is not None:
-        if not isinstance(sam3_raw, Mapping):
-            raise MaskDataError("mask_data.sam3 must be an object")
-        action = str(sam3_raw.get("action", "frame"))
-        if action not in {"frame", "track"}:
-            raise MaskDataError("mask_data.sam3.action must be 'frame' or 'track'")
-        frame = _frame_number(sam3_raw.get("frame", 0), frame_count, "sam3.frame")
-        direction = str(sam3_raw.get("direction", "forward"))
-        if direction not in {"forward", "backward", "both"}:
-            raise MaskDataError("mask_data.sam3.direction must be forward, backward, or both")
-        token = sam3_raw.get("seed_token", "")
-        if token is None:
-            token = ""
-        if not isinstance(token, (str, int, float)) or isinstance(token, bool):
-            raise MaskDataError("mask_data.sam3.seed_token must be a string")
-        token = str(token)
-        if len(token) > 256:
-            raise MaskDataError("mask_data.sam3.seed_token is too long")
-        sam3 = {
-            "action": action,
-            "frame": frame,
-            "direction": direction,
-            "seed_token": token,
-        }
-        prompt = sam3_raw.get("prompt")
-        objects = sam3_raw.get("objects")
-        if prompt is not None:
-            sam3["prompt"] = _sam3_prompt(prompt, frame, frame_count, "sam3.prompt")
-        if objects is not None:
-            if prompt is not None or not isinstance(objects, list) or not 1 <= len(objects) <= MAX_SAM3_OBJECTS:
-                raise MaskDataError(f"sam3.objects must contain 1–{MAX_SAM3_OBJECTS} objects and replaces sam3.prompt")
-            sam3["objects"] = [
-                _sam3_prompt(item, frame, frame_count, f"sam3.objects[{index}]")
-                for index, item in enumerate(objects)
-            ]
-            for item in sam3["objects"]:
-                if item["frame"] != frame:
-                    raise MaskDataError("SAM3 objects must share the seed frame")
-                if "points" in item and (len(item["points"]) > MAX_SAM3_OBJECT_POINTS or 1 not in item["labels"]):
-                    raise MaskDataError(f"SAM3 object requires a positive point and at most {MAX_SAM3_OBJECT_POINTS} points")
-        result["sam3"] = sam3
+
+    if layers_raw is not None:
+        parsed_layers, active_id = _parse_layers(layers_raw, raw, frame_count)
+        active_layer = next(item for item in parsed_layers if item["id"] == active_id)
+        result["frames"] = copy.deepcopy(active_layer["frames"])
+        if active_layer.get("anchors"):
+            result["anchors"] = list(active_layer["anchors"])
+        if raw.get("tracking_mode") is not None:
+            mode = str(raw["tracking_mode"])
+            if mode not in _LAYER_TYPES:
+                raise MaskDataError("tracking_mode must be optical_flow, static, keyframes, or sam3")
+            result["tracking_mode"] = mode
+        else:
+            result["tracking_mode"] = active_layer["type"]
+        if "sam3" in active_layer:
+            result["sam3"] = copy.deepcopy(active_layer["sam3"])
+        result["layers"] = parsed_layers
+        result["active_layer_id"] = active_id
+    else:
+        canonical_frames, explicit_anchors, _, _ = _parse_frame_payload(raw, frame_count)
+        result["frames"] = canonical_frames
+        if explicit_anchors:
+            result["anchors"] = explicit_anchors
+        if raw.get("tracking_mode") is not None:
+            mode = str(raw["tracking_mode"])
+            if mode not in _LAYER_TYPES:
+                raise MaskDataError("tracking_mode must be optical_flow, static, keyframes, or sam3")
+            result["tracking_mode"] = mode
+        sam3_raw = raw.get("sam3")
+        if sam3_raw is not None:
+            result["sam3"] = _parse_sam3_config(sam3_raw, frame_count)
+
     crop = normalize_crop_settings(raw.get("crop"))
     if crop is not None:
         result["crop"] = crop
@@ -1863,41 +2080,29 @@ def _build_raw_tracking_sequence(
     return mask, edit_bases, anchors, {}
 
 
-def build_mask_sequence(images: np.ndarray, mask_data: Any = "{}", *, tracking_mode: str = "optical_flow",
-                        grow: int = 8, feather: int = 4, start_frame: int = 0,
-                        end_frame: int = -1, fingerprint: str | None = None,
-                        return_edit_bases: bool = False,
-                        return_sam3_meta: bool = False,
-                        return_raw_mask: bool = False) -> tuple:
-    """Build a safe ``TxHxW`` mask and return ``(mask, canonical_doc, anchors)``.
+def _apply_layer_blend(target: np.ndarray, src: np.ndarray, blend: str) -> None:
+    if blend == "subtract":
+        np.subtract(target, src, out=target)
+        np.maximum(target, 0.0, out=target)
+    elif blend == "intersect":
+        np.minimum(target, src, out=target)
+    else:
+        np.maximum(target, src, out=target)
 
-    Empty or malformed edits never become a full-frame mask: malformed input
-    raises ``MaskDataError`` and an empty document returns all zeros.
-    ``return_edit_bases`` appends the raw editing baseline without running
-    optical flow again when the node also needs browser preview assets.
-    """
 
+def _compute_layer_raw(
+    images: np.ndarray,
+    doc: Mapping[str, Any],
+    *,
+    tracking_mode: str,
+    start: int,
+    end: int,
+) -> tuple[np.ndarray, np.ndarray, set[int], dict[str, Any]]:
     global _raw_tracking_cache_bypasses
-    images = np.asarray(images)
-    if images.ndim != 4 or images.shape[0] < 1 or images.shape[1] < 1 or images.shape[2] < 1:
-        raise MaskDataError("images must have shape T x H x W x C and contain at least one frame")
     count, height, width = map(int, images.shape[:3])
-    if count > MAX_FRAMES:
-        raise MaskDataError("clips longer than 4096 frames are not supported by this editor")
-    parsed = parse_mask_data(mask_data, count, width=width, height=height, fingerprint=fingerprint)
-    tracking_mode = str(tracking_mode or parsed.get("tracking_mode", "optical_flow"))
-    if tracking_mode not in {"optical_flow", "static", "keyframes", "sam3"}:
-        raise MaskDataError("tracking_mode must be optical_flow, static, keyframes, or sam3")
-    start = max(0, int(start_frame))
-    end = count - 1 if int(end_frame) < 0 else min(count - 1, int(end_frame))
-    # Native SAM3 video results have their own source/token-aware cache.  Do
-    # not put local brush edits into the generic whole-document cache: a brush
-    # change must recompose from the immutable native raw sequence without a
-    # second model run.
     cache_allowed = (
         tracking_mode != "sam3"
-        and
-        int(MAX_RAW_TRACKING_CACHE_ENTRIES) > 0
+        and int(MAX_RAW_TRACKING_CACHE_ENTRIES) > 0
         and int(MAX_RAW_TRACKING_CACHE_BYTES) > 0
         and int(MAX_RAW_TRACKING_CACHE_ITEM_BYTES) > 0
         and int(images.nbytes) <= int(MAX_RAW_TRACKING_CACHE_SOURCE_BYTES)
@@ -1905,7 +2110,7 @@ def build_mask_sequence(images: np.ndarray, mask_data: Any = "{}", *, tracking_m
     cached: tuple[np.ndarray, np.ndarray, set[int]] | None = None
     cache_key: tuple[Any, ...] | None = None
     if cache_allowed:
-        cache_key = _raw_tracking_cache_key(images, parsed, tracking_mode, start, end)
+        cache_key = _raw_tracking_cache_key(images, doc, tracking_mode, start, end)
         cached = _raw_tracking_cache_get(cache_key)
     else:
         with _raw_tracking_cache_lock:
@@ -1914,7 +2119,7 @@ def build_mask_sequence(images: np.ndarray, mask_data: Any = "{}", *, tracking_m
     sam3_meta: dict[str, Any] = {}
     if cached is None:
         built = _build_raw_tracking_sequence(
-            images, parsed, tracking_mode=tracking_mode, start=start, end=end
+            images, doc, tracking_mode=tracking_mode, start=start, end=end
         )
         raw_mask, edit_bases, anchors, sam3_meta = built
         if cache_allowed and cache_key is not None:
@@ -1923,7 +2128,7 @@ def build_mask_sequence(images: np.ndarray, mask_data: Any = "{}", *, tracking_m
         raw_mask, edit_bases, anchors = cached
 
     if tracking_mode == "sam3" and sam3_meta.get("seed_token"):
-        parsed_sam3 = parsed.get("sam3")
+        parsed_sam3 = doc.get("sam3") if isinstance(doc, Mapping) else None
         if isinstance(parsed_sam3, dict):
             parsed_sam3["seed_token"] = str(sam3_meta["seed_token"])
 
@@ -1950,11 +2155,112 @@ def build_mask_sequence(images: np.ndarray, mask_data: Any = "{}", *, tracking_m
             if not computed_frames:
                 raw_mask[frame] = 0.0
                 continue
-            events = _overlay_events(parsed, frame)
+            events = _overlay_events(doc, frame)
             if events:
                 raw_mask[frame] = rasterize_events(
                     events, height, width, images[frame], raw_mask[frame]
                 )
+
+    return raw_mask, edit_bases, anchors, sam3_meta
+
+
+def build_mask_sequence(images: np.ndarray, mask_data: Any = "{}", *, tracking_mode: str = "optical_flow",
+                        grow: int = 8, feather: int = 4, start_frame: int = 0,
+                        end_frame: int = -1, fingerprint: str | None = None,
+                        return_edit_bases: bool = False,
+                        return_sam3_meta: bool = False,
+                        return_raw_mask: bool = False,
+                        return_layers_meta: bool = False) -> tuple:
+    """Build a safe ``TxHxW`` mask and return ``(mask, canonical_doc, anchors)``.
+
+    Empty or malformed edits never become a full-frame mask: malformed input
+    raises ``MaskDataError`` and an empty document returns all zeros.
+    ``return_edit_bases`` appends the raw editing baseline without running
+    optical flow again when the node also needs browser preview assets.
+    """
+
+    images = np.asarray(images)
+    if images.ndim != 4 or images.shape[0] < 1 or images.shape[1] < 1 or images.shape[2] < 1:
+        raise MaskDataError("images must have shape T x H x W x C and contain at least one frame")
+    count, height, width = map(int, images.shape[:3])
+    if count > MAX_FRAMES:
+        raise MaskDataError("clips longer than 4096 frames are not supported by this editor")
+    parsed = parse_mask_data(mask_data, count, width=width, height=height, fingerprint=fingerprint)
+    layers_meta: list[dict[str, Any]] = []
+
+    if "layers" in parsed:
+        active_id = str(parsed.get("active_layer_id") or parsed["layers"][0]["id"])
+        raw_mask = np.zeros((count, height, width), dtype=np.float32)
+        edit_bases = np.zeros((count, height, width), dtype=np.float32)
+        anchors: set[int] = set()
+        sam3_meta: dict[str, Any] = {}
+
+        for layer in parsed["layers"]:
+            if not layer.get("enabled", True):
+                layers_meta.append({
+                    "id": layer["id"],
+                    "name": layer["name"],
+                    "type": layer["type"],
+                    "blend": layer["blend"],
+                    "enabled": False,
+                    "start_frame": int(layer.get("start_frame", 0)),
+                    "end_frame": int(layer.get("end_frame", -1)),
+                    "has_mask": False,
+                    "anchors": [],
+                })
+                continue
+
+            l_start = max(0, int(layer.get("start_frame", 0)))
+            l_end_raw = int(layer.get("end_frame", -1))
+            l_end = count - 1 if l_end_raw < 0 else min(count - 1, l_end_raw)
+            layer_doc: dict[str, Any] = {
+                "version": 1,
+                "frames": copy.deepcopy(layer.get("frames", {})),
+                "tracking_mode": layer["type"],
+            }
+            if layer.get("anchors"):
+                layer_doc["anchors"] = list(layer["anchors"])
+            if layer["type"] == "sam3" and isinstance(layer.get("sam3"), Mapping):
+                layer_doc["sam3"] = copy.deepcopy(layer["sam3"])
+
+            l_raw, l_edit_bases, l_anchors, l_sam3 = _compute_layer_raw(
+                images, layer_doc, tracking_mode=layer["type"], start=l_start, end=l_end
+            )
+            if layer["type"] == "sam3" and isinstance(layer_doc.get("sam3"), Mapping):
+                if layer_doc["sam3"].get("seed_token"):
+                    layer.setdefault("sam3", {})["seed_token"] = str(layer_doc["sam3"]["seed_token"])
+                    if layer["id"] == active_id and isinstance(parsed.get("sam3"), dict):
+                        parsed["sam3"]["seed_token"] = str(layer_doc["sam3"]["seed_token"])
+
+            blend = layer["blend"]
+            _apply_layer_blend(raw_mask, l_raw, blend)
+            base_contrib = l_edit_bases if layer["id"] == active_id else l_raw
+            _apply_layer_blend(edit_bases, base_contrib, blend)
+            anchors |= l_anchors
+            if layer["id"] == active_id and l_sam3:
+                sam3_meta = dict(l_sam3)
+
+            layers_meta.append({
+                "id": layer["id"],
+                "name": layer["name"],
+                "type": layer["type"],
+                "blend": blend,
+                "enabled": True,
+                "start_frame": int(layer.get("start_frame", 0)),
+                "end_frame": int(layer.get("end_frame", -1)),
+                "has_mask": bool(np.any(l_raw > 1e-5)),
+                "anchors": sorted(int(f) for f in l_anchors),
+                **({"sam3": dict(l_sam3)} if layer["type"] == "sam3" and l_sam3 else {}),
+            })
+    else:
+        tracking_mode = str(tracking_mode or parsed.get("tracking_mode", "optical_flow"))
+        if tracking_mode not in {"optical_flow", "static", "keyframes", "sam3"}:
+            raise MaskDataError("tracking_mode must be optical_flow, static, keyframes, or sam3")
+        start = max(0, int(start_frame))
+        end = count - 1 if int(end_frame) < 0 else min(count - 1, int(end_frame))
+        raw_mask, edit_bases, anchors, sam3_meta = _compute_layer_raw(
+            images, parsed, tracking_mode=tracking_mode, start=start, end=end
+        )
 
     mask = postprocess_mask(raw_mask, grow=grow, feather=feather)
     # Tracking already preserves the painted anchors. Apply edge controls to
@@ -1966,6 +2272,8 @@ def build_mask_sequence(images: np.ndarray, mask_data: Any = "{}", *, tracking_m
         outputs.append(sam3_meta)
     if return_raw_mask:
         outputs.append(raw_mask)
+    if return_layers_meta:
+        outputs.append(layers_meta)
     return tuple(outputs)
 
 
@@ -2320,11 +2628,21 @@ def cache_compare_preview_assets(
 
 
 def encode_preview_assets(images: np.ndarray, masks: np.ndarray, *, max_frames: int = MAX_PREVIEW_FRAMES,
-                          max_size: int = MAX_PREVIEW_SIZE) -> list[dict[str, Any]]:
+                          max_size: int = MAX_PREVIEW_SIZE,
+                          edit_bases: np.ndarray | None = None,
+                          raw_masks: np.ndarray | None = None) -> list[dict[str, Any]]:
     """Encode bounded source/mask previews for the Comfy ``ui`` channel."""
 
     if images.ndim != 4 or masks.ndim != 3 or images.shape[0] != masks.shape[0]:
         raise MaskDataError("preview images/masks must have matching T dimensions")
+    if edit_bases is not None:
+        edit_bases = np.asarray(edit_bases)
+        if edit_bases.shape != masks.shape:
+            raise MaskDataError("preview edit bases must match mask dimensions")
+    if raw_masks is not None:
+        raw_masks = np.asarray(raw_masks)
+        if raw_masks.shape != masks.shape:
+            raise MaskDataError("preview raw masks must match mask dimensions")
     try:
         from PIL import Image  # noqa: F401
     except Exception:
@@ -2340,18 +2658,23 @@ def encode_preview_assets(images: np.ndarray, masks: np.ndarray, *, max_frames: 
         source_payload, mask_payload, size = _preview_buffers(
             images[frame], masks[frame], max_size=max_size
         )
-        result.append({
+        entry: dict[str, Any] = {
             "frame": int(frame),
             "width": size[0],
             "height": size[1],
             "data_url": _data_url(source_payload, "image/jpeg"),
             "mask_url": _data_url(mask_payload, "image/png"),
-        })
+        }
+        if edit_bases is not None:
+            entry["edit_base"] = _data_url(_mask_png_payload(edit_bases[frame], size), "image/png")
+        if raw_masks is not None:
+            entry["raw_mask"] = _data_url(_mask_png_payload(raw_masks[frame], size), "image/png")
+        result.append(entry)
     return result
 
 
 __all__ = [
-    "MAX_FRAMES", "MAX_EVENTS", "MAX_POINTS", "MAX_PREVIEW_FRAMES", "MAX_PREVIEW_SIZE",
+    "MAX_FRAMES", "MAX_EVENTS", "MAX_POINTS", "MAX_PREVIEW_FRAMES", "MAX_PREVIEW_SIZE", "MAX_MASK_LAYERS",
     "MAX_TEMP_CACHE_BYTES", "MAX_TEMP_CACHE_SESSIONS", "MAX_TEMP_CACHE_SESSION_BYTES",
     "MAX_RAW_TRACKING_CACHE_ENTRIES", "MAX_RAW_TRACKING_CACHE_BYTES",
     "MAX_RAW_TRACKING_CACHE_ITEM_BYTES", "MAX_RAW_TRACKING_CACHE_SOURCE_BYTES",

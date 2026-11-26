@@ -125,6 +125,10 @@ assert.equal(widgets.find((item) => item.name === "end_frame").value, -1);
 assert.equal(editor.state.frame, 0);
 assert.equal(editor.state.zoom, 1);
 assert.equal(node.properties.__thsPreviousMask.mask_data, JSON.stringify(oldDocument));
+const editorAlertBanner = find(editor.root, (item) => String(item.className || "").includes("ths-mask-alert-overlay"));
+assert.equal(editorAlertBanner.style.display, "flex", "recovery banner remains visible while accepted clip is blank");
+assert.equal(editorAlertBanner.dataset.state, "info", "neutral status banner does not show warning border");
+assert.equal(findButton(editor.root, "Вернуть прежнюю маску").style.display, "inline-flex");
 
 findButton(editor.root, "Вернуть прежнюю маску").click();
 assert.deepEqual(editor.document.frames, oldDocument.frames);
@@ -242,5 +246,101 @@ const listenerCount = (apiListeners.get("execution_error") || []).length;
 assert.equal(listenerCount, 1, "destroy detaches only the refined editor listener");
 editor.destroy();
 assert.equal((apiListeners.get("execution_error") || []).length, 0);
+
+// Alert banner auto-hides once a new mask is created or computed, and dismisses manually when idle.
+const bannerWidgets = [
+    { name: "mask_data", value: "{}", options: {} }, { name: "tracking_mode", value: "static" },
+    { name: "grow", value: 8 }, { name: "feather", value: 4 }, { name: "start_frame", value: 0 }, { name: "end_frame", value: -1 },
+];
+const bannerSourceOld = { frames: 2, width: 160, height: 128, fingerprint: "old-fp" };
+const bannerSourceNew = { frames: 3, width: 320, height: 256, fingerprint: "new-fp" };
+const bannerDocOld = { version: 1, source: bannerSourceOld, frames: { "0": { events: [{ type: "rect", mode: "add", x: 0.2, y: 0.2, w: 0.3, h: 0.3 }] } } };
+bannerWidgets[0].value = JSON.stringify(bannerDocOld);
+const bannerNode = { id: 4, widgets: bannerWidgets, properties: {}, graph: { setDirtyCanvas() {} }, addDOMWidget(_name, _type, root) { this.root = root; } };
+const bannerEditor = createUniversalMaskEditor(bannerNode, { app, api });
+await bannerEditor.applyExecuted({
+    universal_mask_meta: [{ source_mismatch: true, source_mismatch_reason: "frames", previous_source: bannerSourceOld, source: bannerSourceNew, has_mask: false, anchors: [] }],
+    universal_mask_frames: [{ frame: 0, source: { data_url: "data:image/png;base64,new" } }],
+});
+findButton(bannerEditor.root, "Начать маску для нового клипа").click();
+const bannerOverlay = find(bannerEditor.root, (item) => String(item.className || "").includes("ths-mask-alert-overlay"));
+const dismissButton = find(bannerEditor.root, (item) => item.attributes?.["aria-label"] === "Скрыть уведомление");
+assert.equal(bannerOverlay.style.display, "flex");
+assert.equal(dismissButton.style.display, "inline-flex");
+
+// Computing a mask hides the recovery banner instead of leaving "Маска рассчитана..." stuck in an orange box.
+await bannerEditor.applyExecuted({
+    universal_mask_meta: [{ source: bannerSourceNew, has_mask: true, anchors: [0] }],
+    universal_mask_frames: [{ frame: 0, source: { data_url: "data:image/png;base64,new" }, mask: { data_url: "data:image/png;base64,mask" } }],
+});
+assert.equal(bannerOverlay.style.display, "none", "computed mask hides the old-clip recovery banner");
+
+// Dismissing manually on an accepted blank clip clears the backup banner and persisted backup.
+await bannerEditor.applyExecuted({
+    universal_mask_meta: [{ source_mismatch: true, source_mismatch_reason: "fingerprint", previous_source: bannerSourceNew, source: bannerSourceOld, has_mask: false, anchors: [] }],
+    universal_mask_frames: [{ frame: 0, source: { data_url: "data:image/png;base64,old" } }],
+});
+findButton(bannerEditor.root, "Начать маску для нового клипа").click();
+assert.ok(bannerNode.properties.__thsPreviousMask);
+dismissButton.click();
+assert.equal(bannerOverlay.style.display, "none", "dismiss button hides recovery banner");
+assert.equal(bannerNode.properties.__thsPreviousMask, undefined, "dismiss clears persisted backup property");
+bannerEditor.destroy();
+
+// "Новое видео" resets the old mask/source binding cleanly and triggers a partial preview request for the new clip.
+const newVideoDoc = {
+    version: 1,
+    source: { frames: 2, width: 160, height: 128, fingerprint: "prev-clip" },
+    crop: { mode: "manual", margin: 32, multiple: 16, box: [10, 10, 80, 80], size: [160, 128] },
+    frames: { "0": { events: [{ type: "rect", mode: "add", x: 0.2, y: 0.2, w: 0.3, h: 0.3 }] } },
+    sam3: { action: "track", frame: 0, direction: "both", seed_token: "old-token" },
+};
+const newVideoWidgets = [
+    { name: "mask_data", value: JSON.stringify(newVideoDoc), options: {} },
+    { name: "tracking_mode", value: "sam3" },
+    { name: "grow", value: 8 },
+    { name: "feather", value: 4 },
+    { name: "start_frame", value: 1 },
+    { name: "end_frame", value: 1 },
+];
+const newVideoNode = { id: 3, widgets: newVideoWidgets, properties: {}, graph: { setDirtyCanvas() {} }, addDOMWidget(_name, _type, root) { this.root = root; } };
+const newVideoApp = {
+    graph: {},
+    graphToPrompt: async () => ({
+        output: {
+            "1": { class_type: "LoadVideo", inputs: {} },
+            "2": { class_type: "GetVideoComponents", inputs: { video: ["1", 0] } },
+            "3": { class_type: "THSUniversalMaskEditor", inputs: { images: ["2", 0], mask_data: newVideoWidgets[0].value } },
+            "8": { class_type: "KSampler", inputs: { mask: ["3", 0] } },
+        },
+    }),
+};
+const newVideoEditor = createUniversalMaskEditor(newVideoNode, { app: newVideoApp, api });
+const submittedBeforeNewVideo = submitted.length;
+const newVideoButton = findButton(newVideoEditor.root, "Новое видео");
+assert.ok(newVideoButton, "header renders 'Новое видео' button");
+newVideoButton.click();
+await new Promise((resolve) => setTimeout(resolve, 0));
+
+assert.deepEqual(newVideoEditor.document.frames, {}, "old frames cleared");
+assert.equal(newVideoEditor.document.source, undefined, "old source fingerprint cleared");
+assert.equal(newVideoWidgets.find((item) => item.name === "start_frame").value, 0, "start_frame reset to 0");
+assert.equal(newVideoWidgets.find((item) => item.name === "end_frame").value, -1, "end_frame reset to -1");
+assert.deepEqual(newVideoEditor.document.crop, { mode: "auto", margin: 32, multiple: 16 }, "stale manual box switches to auto while keeping margin & multiple");
+assert.equal(submitted.length, submittedBeforeNewVideo + 1, "submits partial preview immediately");
+assert.equal(submitted.at(-1).output["8"], undefined, "partial preview excludes downstream nodes");
+const submittedMaskPayload = JSON.parse(submitted.at(-1).output["3"].inputs.mask_data);
+assert.equal(submittedMaskPayload.source, undefined, "queued preview has no stale source");
+assert.deepEqual(submittedMaskPayload.frames, {});
+
+// Receiving frames for the newly loaded video succeeds without sourceMismatch or stuck alert banner.
+const nextClipResponse = await newVideoEditor.applyExecuted({
+    universal_mask_meta: [{ source: { frames: 5, width: 320, height: 240, fingerprint: "next-clip" }, has_mask: false, anchors: [] }],
+    universal_mask_frames: [{ frame: 0, source: { data_url: "data:image/png;base64,next" } }],
+});
+assert.equal(Boolean(nextClipResponse.sourceMismatch), false, "new clip loads cleanly without mismatch warning");
+const newVideoBanner = find(newVideoEditor.root, (item) => String(item.className || "").includes("ths-mask-alert-overlay"));
+assert.equal(newVideoBanner.style.display, "none", "alert overlay stays hidden on clean new video");
+newVideoEditor.destroy();
 
 console.log("universal_mask_editor_source_refine: PASS");
