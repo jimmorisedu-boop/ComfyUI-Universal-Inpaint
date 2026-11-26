@@ -41,8 +41,8 @@ const MAX_TOTAL_POINTS = 65536;
 const MAX_PREVIEWS = 48;
 const MAX_HISTORY = 80;
 const EDITOR_BUILD = "20261126-mask-editor-live-edges";
-const TOOLTIP_SHOW_DELAY_MS = 650;
-const TOOLTIP_WARM_DELAY_MS = 180;
+const TOOLTIP_SHOW_DELAY_MS = 1400;
+const TOOLTIP_WARM_DELAY_MS = 700;
 const SAM3_FRAME_PREVIEW = "sam3_frame_v1";
 const MAX_SAM3_OBJECTS = 8;
 let nextEditorInstance = 0;
@@ -1445,6 +1445,7 @@ export function createUniversalMaskEditor(node, options = {}) {
     }
 
     let activeTipTrigger = null;
+    let pendingTipTrigger = null;
     let tipOpen = false;
     let tipShowTimer = null;
     let tipHideTimer = null;
@@ -1452,6 +1453,30 @@ export function createUniversalMaskEditor(node, options = {}) {
     let tipPointerDownAt = 0;
     let tipOwnedDescribedBy = false;
 
+    function suppressNativeTitle(trigger) {
+        let cur = trigger;
+        while (cur && cur !== root) {
+            if (cur.dataset?.tooltip || elementAttribute(cur, "title") || cur.title) {
+                if (elementAttribute(cur, "title")) cur.removeAttribute?.("title");
+                if (cur.title) cur.title = "";
+            }
+            cur = cur.parentElement;
+        }
+    }
+    function restoreNativeTitle(trigger) {
+        let cur = trigger;
+        while (cur && cur !== root) {
+            const saved = cur.dataset?.tooltip || "";
+            if (saved) cur.title = saved;
+            cur = cur.parentElement;
+        }
+    }
+    function clearPendingTipTrigger() {
+        if (!pendingTipTrigger) return;
+        const prev = pendingTipTrigger;
+        pendingTipTrigger = null;
+        if (prev !== activeTipTrigger) restoreNativeTitle(prev);
+    }
     function clearTipTimers() {
         if (tipShowTimer) { clearTimeout(tipShowTimer); tipShowTimer = null; }
         if (tipHideTimer) { clearTimeout(tipHideTimer); tipHideTimer = null; }
@@ -1501,12 +1526,12 @@ export function createUniversalMaskEditor(node, options = {}) {
     }
     function closeTooltip({ keepWarm = false } = {}) {
         clearTipTimers();
+        clearPendingTipTrigger();
         if (activeTipTrigger) {
             const prev = activeTipTrigger;
             activeTipTrigger = null;
             if (prev.dataset) delete prev.dataset.thsTipActive;
-            const saved = prev.dataset?.tooltip || "";
-            if (saved) prev.title = saved;
+            restoreNativeTitle(prev);
             if (tipOwnedDescribedBy && elementAttribute(prev, "aria-describedby") === tooltip.id) {
                 prev.removeAttribute?.("aria-describedby");
             }
@@ -1528,11 +1553,12 @@ export function createUniversalMaskEditor(node, options = {}) {
         const text = String(trigger?.dataset?.tooltip || trigger?.title || "").trim();
         if (!text || state.destroyed) { closeTooltip(); return; }
         clearTipTimers();
+        if (pendingTipTrigger && pendingTipTrigger !== trigger) clearPendingTipTrigger();
+        pendingTipTrigger = null;
         if (activeTipTrigger && activeTipTrigger !== trigger) closeTooltip();
         activeTipTrigger = trigger;
         if (trigger.dataset) trigger.dataset.thsTipActive = "true";
-        if (elementAttribute(trigger, "title")) trigger.removeAttribute?.("title");
-        if (trigger.title) trigger.title = "";
+        suppressNativeTitle(trigger);
         tipOwnedDescribedBy = false;
         if (!elementAttribute(trigger, "aria-describedby") && normalizedText(text) !== triggerAccessibleName(trigger)) {
             trigger.setAttribute?.("aria-describedby", tooltip.id);
@@ -1601,17 +1627,21 @@ export function createUniversalMaskEditor(node, options = {}) {
         }
         if (tipHideTimer) { clearTimeout(tipHideTimer); tipHideTimer = null; }
         if (tipShowTimer) { clearTimeout(tipShowTimer); tipShowTimer = null; }
+        if (pendingTipTrigger && pendingTipTrigger !== trigger) clearPendingTipTrigger();
+        pendingTipTrigger = trigger;
+        suppressNativeTitle(trigger);
         const delay = tipOpen || (tipClosedAt > 0 && Date.now() - tipClosedAt < 250) ? TOOLTIP_WARM_DELAY_MS : TOOLTIP_SHOW_DELAY_MS;
         tipShowTimer = setTimeout(() => { tipShowTimer = null; openTooltip(trigger); }, delay);
         tipShowTimer?.unref?.();
     });
     root.addEventListener("pointerout", (event) => {
         const leaving = findTipTrigger(event.target);
-        if (!activeTipTrigger) {
-            const entering = findTipTrigger(event.relatedTarget);
-            if (tipShowTimer && leaving && entering !== leaving) { clearTimeout(tipShowTimer); tipShowTimer = null; }
-            return;
+        const entering = findTipTrigger(event.relatedTarget);
+        if (pendingTipTrigger && leaving === pendingTipTrigger && entering !== leaving) {
+            if (tipShowTimer) { clearTimeout(tipShowTimer); tipShowTimer = null; }
+            clearPendingTipTrigger();
         }
+        if (!activeTipTrigger) return;
         if (leaving !== activeTipTrigger) return;
         const next = event.relatedTarget;
         if (next && ((activeTipTrigger.contains?.(next) || next === activeTipTrigger) || (tooltip.contains?.(next) || next === tooltip))) return;

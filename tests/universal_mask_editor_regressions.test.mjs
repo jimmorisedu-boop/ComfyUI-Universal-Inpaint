@@ -402,9 +402,10 @@ const queueBtn = button(configuredEditor.root, "Запустить граф");
 const queueWrap = find(configuredEditor.root, (item) => item.className === "ths-tip-wrap" && item.children.includes(queueBtn));
 assert.ok(queueWrap, "queue action button wrapped so disabled hover still shows tooltip");
 configuredEditor.root.dispatchEvent({ type: "pointerover", target: queueWrap });
-await new Promise((resolve) => setTimeout(resolve, 250));
+assert.equal(queueWrap.title, "", "native title suppressed while waiting for custom tooltip delay");
+await new Promise((resolve) => setTimeout(resolve, 800));
 assert.equal(sharedTooltip.attributes["data-open"], undefined, "tooltip waits past brief pointer pass before opening");
-await new Promise((resolve) => setTimeout(resolve, 460));
+await new Promise((resolve) => setTimeout(resolve, 700));
 assert.equal(sharedTooltip.attributes["data-open"], "true");
 assert.match(tooltipBody.textContent, /Сначала рассчитайте кадр SAM3/);
 
