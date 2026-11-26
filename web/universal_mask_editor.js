@@ -3650,7 +3650,7 @@ export function createUniversalMaskEditor(node, options = {}) {
             const frameStatusMsg = !state.sam3.frameReady
                 ? (state.sam3.error || "Кадр SAM3 не готов: кликните по объекту или задайте рамку и повторите расчёт.")
                 : rawMeta?.sam3?.keep_existing_mask
-                    ? `Точка уточнения сохранена на кадре ${state.frame + 1}. Нажмите «Отследить видео», чтобы применить правку.`
+                    ? `Точка исключения сохранена на кадре ${state.frame + 1} — нажмите «Отследить видео», чтобы пересчитать маску.`
                     : "Объект выделен. Уточните точками +/− или нажмите «Отследить видео».";
             setStatus(frameStatusMsg, state.sam3.frameReady ? "ready" : "warn");
             if (state.frameItems.size) loadFrame(state.frame, { generation: state.loadGeneration }); else draw();

@@ -447,7 +447,13 @@ def _offload_model(model: Any) -> None:
         pass
 
 
-def _predict_native(image: np.ndarray, event: Mapping[str, Any], *, keep_loaded: bool = False) -> np.ndarray:
+def _predict_native(
+    image: np.ndarray,
+    event: Mapping[str, Any],
+    *,
+    keep_loaded: bool = False,
+    mask_input: np.ndarray | None = None,
+) -> np.ndarray:
     """Run one box or point prompt through the native interactive predictor."""
 
     config = _native_config()
@@ -522,12 +528,36 @@ def _predict_native(image: np.ndarray, event: Mapping[str, Any], *, keep_loaded:
                 raise SAM3UnavailableError("SAM3 point prompt must contain matching points and labels")
         else:
             raw_box = np.asarray([x0, y0, x1, y1], dtype=np.float32)
+        mask_tensor = None
+        if mask_input is not None:
+            mh, mw = 256, 256
+            weight_dtype = torch.float32
+            try:
+                enc = predictor.inst_interactive_predictor.model.sam_prompt_encoder
+                enc_size = getattr(enc, "mask_input_size", None)
+                if isinstance(enc_size, (tuple, list)) and len(enc_size) == 2:
+                    mh, mw = max(1, int(enc_size[0])), max(1, int(enc_size[1]))
+                down = getattr(enc, "mask_downscaling", None)
+                if down is not None and len(down) > 0 and hasattr(down[0], "weight"):
+                    weight_dtype = down[0].weight.dtype
+            except Exception:
+                pass
+            mask_arr = np.asarray(mask_input, dtype=np.float32)
+            if mask_arr.shape != (mh, mw):
+                try:
+                    import cv2  # type: ignore
+
+                    mask_arr = cv2.resize(mask_arr, (mw, mh), interpolation=cv2.INTER_LINEAR)
+                except Exception:
+                    mask_arr = np.asarray(_resize_mask(mask_arr, (mh, mw)), dtype=np.float32)
+            logits = np.where(mask_arr > 0.5, 6.0, -6.0).astype(np.float32)[None, ...]
+            mask_tensor = torch.from_numpy(logits).to(dtype=weight_dtype)
         masks, scores, _low_res = predictor.predict_inst(
             state,
             point_coords=point_coords,
             point_labels=point_labels,
             box=raw_box,
-            mask_input=None,
+            mask_input=mask_tensor,
             multimask_output=True,
             normalize_coords=True,
         )
@@ -537,7 +567,17 @@ def _predict_native(image: np.ndarray, event: Mapping[str, Any], *, keep_loaded:
             masks_array = masks_array[None, ...]
         if masks_array.ndim != 3 or masks_array.shape[0] < 1:
             raise SAM3UnavailableError("SAM3 returned no mask candidates for the prompt")
-        valid: list[tuple[float, int, np.ndarray]] = []
+        pos_pixels: list[tuple[int, int]] = []
+        neg_pixels: list[tuple[int, int]] = []
+        if point_mode and point_coords is not None and point_labels is not None:
+            for (px, py), lbl in zip(point_coords, point_labels):
+                cx = min(max(0, int(round(float(px)))), width - 1)
+                cy = min(max(0, int(round(float(py)))), height - 1)
+                if int(lbl) == 1:
+                    pos_pixels.append((cx, cy))
+                elif int(lbl) == 0:
+                    neg_pixels.append((cx, cy))
+        valid: list[tuple[tuple[Any, ...], np.ndarray]] = []
         for index, candidate in enumerate(masks_array):
             candidate = _resize_mask(np.squeeze(candidate), (height, width))
             candidate = np.asarray(candidate > 0.0, dtype=bool) & selection
@@ -550,13 +590,20 @@ def _predict_native(image: np.ndarray, event: Mapping[str, Any], *, keep_loaded:
                 score = float("-inf")
             if not np.isfinite(score):
                 score = float("-inf")
-            valid.append((score, index, candidate))
+            if neg_pixels:
+                pos_hits = sum(1 for cx, cy in pos_pixels if bool(candidate[cy, cx]))
+                neg_hits = sum(1 for cx, cy in neg_pixels if bool(candidate[cy, cx]))
+                has_pos = (pos_hits > 0) if pos_pixels else True
+                rank_key: tuple[Any, ...] = (has_pos, -neg_hits, pos_hits, score, -index)
+            else:
+                rank_key = (score, -index)
+            valid.append((rank_key, candidate))
         if not valid:
             raise SAM3UnavailableError(
                 "SAM3 found no valid foreground object for the prompt "
                 "(all candidates were empty or filled the selection)"
             )
-        _score, _index, selected = max(valid, key=lambda item: (item[0], -item[1]))
+        _best_key, selected = max(valid, key=lambda item: item[0])
         completed = True
         return np.asarray(selected, dtype=bool)
     except SAM3UnavailableError:

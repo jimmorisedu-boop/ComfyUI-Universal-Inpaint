@@ -15,6 +15,7 @@ from __future__ import annotations
 import gc
 import hashlib
 import importlib
+import inspect
 import logging
 import threading
 import uuid
@@ -60,6 +61,7 @@ class SAM3Seed:
     object_id: int = 1
     objects: tuple[tuple[str, np.ndarray], ...] = ()
     object_frames: tuple[int, ...] = ()
+    refinement_masks: tuple[tuple[int, int, np.ndarray], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,8 +76,10 @@ MAX_SEEDS = 32
 MAX_RAW_RESULTS = 8
 MAX_RAW_CACHE_BYTES = 256 * 1024 * 1024
 MAX_RAW_CACHE_ITEM_BYTES = 128 * 1024 * 1024
+MAX_OBJECT_TRACK_CACHE_BYTES = 128 * 1024 * 1024
 _SEED_CACHE: "OrderedDict[str, SAM3Seed]" = OrderedDict()
 _RAW_CACHE: "OrderedDict[tuple[Any, ...], tuple[bytes, tuple[int, ...], frozenset[int], dict[str, Any], int]]" = OrderedDict()
+_OBJECT_TRACK_CACHE: "OrderedDict[tuple[str, int], tuple[bytes, tuple[int, ...], int]]" = OrderedDict()
 _CACHE_LOCK = threading.RLock()
 _VIDEO_INFERENCE_LOCK = threading.RLock()
 _VIDEO_MODULE: Any | None = None
@@ -84,18 +88,22 @@ _LAST_NATIVE_SEED_STRATEGY = "unknown"
 _RAW_CACHE_BYTES = 0
 _RAW_CACHE_HITS = 0
 _RAW_CACHE_MISSES = 0
+_OBJECT_TRACK_CACHE_BYTES = 0
 
 
 def clear_sam3_video_cache() -> None:
     """Drop process-local SAM3 video seeds and raw tracking results."""
 
-    global _RAW_CACHE_BYTES, _RAW_CACHE_HITS, _RAW_CACHE_MISSES
+    global _RAW_CACHE_BYTES, _RAW_CACHE_HITS, _RAW_CACHE_MISSES, _OBJECT_TRACK_CACHE_BYTES
     with _CACHE_LOCK:
         _SEED_CACHE.clear()
         _RAW_CACHE.clear()
+        _OBJECT_TRACK_CACHE.clear()
+        _REF_MASK_CACHE.clear()
         _RAW_CACHE_BYTES = 0
         _RAW_CACHE_HITS = 0
         _RAW_CACHE_MISSES = 0
+        _OBJECT_TRACK_CACHE_BYTES = 0
 
 
 def sam3_video_cache_info() -> dict[str, int]:
@@ -331,6 +339,211 @@ def _has_prompt_on_frame(item: Mapping[str, Any], target_frame: int) -> bool:
     return any(int(ref.get("frame", -1)) == int(target_frame) for ref in item.get("refinements", []))
 
 
+_REF_MASK_CACHE: "OrderedDict[tuple[str, int, int, str], np.ndarray]" = OrderedDict()
+
+
+def _store_object_track_mask(source_digest: str, object_id: int, raw_mask: np.ndarray) -> None:
+    global _OBJECT_TRACK_CACHE_BYTES
+    payload, shape = _pack_binary_mask(raw_mask)
+    item_bytes = len(payload)
+    if item_bytes <= 0 or item_bytes > int(MAX_OBJECT_TRACK_CACHE_BYTES):
+        return
+    key = (str(source_digest), int(object_id))
+    with _CACHE_LOCK:
+        previous = _OBJECT_TRACK_CACHE.pop(key, None)
+        if previous is not None:
+            _OBJECT_TRACK_CACHE_BYTES = max(0, _OBJECT_TRACK_CACHE_BYTES - int(previous[-1]))
+        while _OBJECT_TRACK_CACHE and _OBJECT_TRACK_CACHE_BYTES + item_bytes > int(MAX_OBJECT_TRACK_CACHE_BYTES):
+            _old_key, old_entry = _OBJECT_TRACK_CACHE.popitem(last=False)
+            _OBJECT_TRACK_CACHE_BYTES = max(0, _OBJECT_TRACK_CACHE_BYTES - int(old_entry[-1]))
+        _OBJECT_TRACK_CACHE[key] = (payload, shape, item_bytes)
+        _OBJECT_TRACK_CACHE_BYTES += item_bytes
+        _OBJECT_TRACK_CACHE.move_to_end(key)
+
+
+def _lookup_prior_frame_mask(
+    source_digest: str,
+    object_id: int,
+    frame: int,
+    expected: tuple[int, int],
+    *,
+    allow_combined_fallback: bool = True,
+) -> np.ndarray | None:
+    payload = None
+    shape: tuple[int, ...] = ()
+    with _CACHE_LOCK:
+        entry = _OBJECT_TRACK_CACHE.get((str(source_digest), int(object_id)))
+        if entry is None and allow_combined_fallback:
+            entry = _OBJECT_TRACK_CACHE.get((str(source_digest), 0))
+        if entry is not None:
+            _OBJECT_TRACK_CACHE.move_to_end((str(source_digest), int(object_id) if (str(source_digest), int(object_id)) in _OBJECT_TRACK_CACHE else 0))
+            payload, shape, _ = entry
+        elif allow_combined_fallback:
+            for key in reversed(list(_RAW_CACHE.keys())):
+                if len(key) >= 1 and key[0] == source_digest:
+                    raw_payload, raw_shape, _anchors, _meta, _bytes = _RAW_CACHE[key]
+                    payload, shape = raw_payload, raw_shape
+                    break
+    if payload is None or len(shape) != 3 or not (0 <= int(frame) < int(shape[0])):
+        return None
+    unpacked = _unpack_binary_mask(payload, shape)
+    frame_mask = np.asarray(unpacked[int(frame)] > 0.5, dtype=bool)
+    if frame_mask.shape != expected:
+        frame_mask = np.asarray(_resize_mask(frame_mask.astype(np.float32), expected) > 0.5, dtype=bool)
+    return frame_mask.copy() if bool(frame_mask.any()) else None
+
+
+def _connected_components(mask: np.ndarray) -> tuple[int, np.ndarray]:
+    binary = np.asarray(mask, dtype=bool)
+    if not bool(binary.any()):
+        return 1, np.zeros(binary.shape, dtype=np.int32)
+    try:
+        import cv2  # type: ignore
+
+        num_labels, labels = cv2.connectedComponents(binary.astype(np.uint8))
+        return int(num_labels), np.asarray(labels, dtype=np.int32)
+    except Exception:
+        h, w = binary.shape
+        labels = np.zeros((h, w), dtype=np.int32)
+        current = 0
+        for sy, sx in zip(*np.nonzero(binary)):
+            sy_i, sx_i = int(sy), int(sx)
+            if labels[sy_i, sx_i] != 0:
+                continue
+            current += 1
+            stack = [(sy_i, sx_i)]
+            labels[sy_i, sx_i] = current
+            while stack:
+                cy, cx = stack.pop()
+                for ny in range(max(0, cy - 1), min(h, cy + 2)):
+                    for nx in range(max(0, cx - 1), min(w, cx + 2)):
+                        if binary[ny, nx] and labels[ny, nx] == 0:
+                            labels[ny, nx] = current
+                            stack.append((ny, nx))
+        return current + 1, labels
+
+
+def _safe_interior_point(safe_fg: np.ndarray) -> tuple[int, int] | None:
+    fg = np.asarray(safe_fg, dtype=bool)
+    if not bool(fg.any()):
+        return None
+    try:
+        import cv2  # type: ignore
+
+        dist = cv2.distanceTransform(fg.astype(np.uint8), cv2.DIST_L2, 5)
+        dist = np.where(fg, dist, -1.0)
+        best_y, best_x = np.unravel_index(int(np.argmax(dist)), dist.shape)
+        return int(best_x), int(best_y)
+    except Exception:
+        ys, xs = np.nonzero(fg)
+        mid = len(xs) // 2
+        return int(xs[mid]), int(ys[mid])
+
+
+def _prepare_refinement_prompt(
+    prior_mask: np.ndarray,
+    ref: Mapping[str, Any],
+) -> tuple[dict[str, Any], np.ndarray, list[list[float]]]:
+    clean_prior = np.asarray(prior_mask, dtype=bool).copy()
+    h, w = clean_prior.shape[:2]
+    pts = [list(pt) for pt in ref.get("points", [])]
+    lbls = [int(lbl) for lbl in ref.get("labels", [1] * len(pts))]
+    user_pos: list[tuple[int, int]] = []
+    user_neg: list[tuple[int, int]] = []
+    for pt, lbl in zip(pts, lbls):
+        px = min(max(0, int(round(float(pt[0]) * max(1, w - 1)))), w - 1)
+        py = min(max(0, int(round(float(pt[1]) * max(1, h - 1)))), h - 1)
+        if lbl == 1:
+            user_pos.append((px, py))
+        elif lbl == 0:
+            user_neg.append((px, py))
+    if user_neg and bool(clean_prior.any()):
+        _num_labels, comp_labels = _connected_components(clean_prior)
+        keep_comps = {int(comp_labels[py, px]) for px, py in user_pos if int(comp_labels[py, px]) > 0}
+        neg_comps = {int(comp_labels[ny, nx]) for nx, ny in user_neg if int(comp_labels[ny, nx]) > 0}
+        drop_comps = neg_comps - keep_comps
+        if drop_comps:
+            candidate_prior = clean_prior & ~np.isin(comp_labels, list(drop_comps))
+            if bool(candidate_prior.any()):
+                clean_prior = candidate_prior
+    safe_fg = clean_prior.copy()
+    if user_neg and bool(safe_fg.any()):
+        radius = max(12, int(round(0.04 * min(h, w)))) if min(h, w) >= 120 else max(1, int(round(0.08 * min(h, w))))
+        yy, xx = np.ogrid[:h, :w]
+        for nx, ny in user_neg:
+            safe_fg[((yy - ny) ** 2 + (xx - nx) ** 2) <= radius * radius] = False
+    auto_pos_points: list[list[float]] = []
+    aug_points = list(pts)
+    aug_labels = list(lbls)
+    need_auto_pos = bool(safe_fg.any()) and not any(bool(safe_fg[py, px]) for px, py in user_pos)
+    if need_auto_pos:
+        interior = _safe_interior_point(safe_fg)
+        if interior is not None:
+            ax, ay = interior
+            norm_pt = [round(ax / max(1, w - 1), 6), round(ay / max(1, h - 1), 6)]
+            aug_points.append(norm_pt)
+            aug_labels.append(1)
+            auto_pos_points.append(norm_pt)
+    aug_event = {**dict(ref), "points": aug_points, "labels": aug_labels}
+    return aug_event, clean_prior, auto_pos_points
+
+
+def _drop_negated_disconnected_islands(
+    mask: np.ndarray,
+    ref: Mapping[str, Any],
+    auto_pos_points: Iterable[Iterable[float]],
+) -> np.ndarray:
+    result = np.asarray(mask, dtype=bool).copy()
+    if not bool(result.any()):
+        return result
+    h, w = result.shape[:2]
+    pts = list(ref.get("points", []))
+    lbls = list(ref.get("labels", [1] * len(pts)))
+    neg_pixels = [
+        (min(max(0, int(round(float(pt[0]) * max(1, w - 1)))), w - 1), min(max(0, int(round(float(pt[1]) * max(1, h - 1)))), h - 1))
+        for pt, lbl in zip(pts, lbls)
+        if int(lbl) == 0
+    ]
+    if not neg_pixels:
+        return result
+    pos_pixels = [
+        (min(max(0, int(round(float(pt[0]) * max(1, w - 1)))), w - 1), min(max(0, int(round(float(pt[1]) * max(1, h - 1)))), h - 1))
+        for pt, lbl in zip(pts, lbls)
+        if int(lbl) == 1
+    ] + [
+        (min(max(0, int(round(float(pt[0]) * max(1, w - 1)))), w - 1), min(max(0, int(round(float(pt[1]) * max(1, h - 1)))), h - 1))
+        for pt in auto_pos_points
+    ]
+    num_labels, comp_labels = _connected_components(result)
+    if num_labels <= 2:
+        return result
+    keep_comps = {int(comp_labels[py, px]) for px, py in pos_pixels if int(comp_labels[py, px]) > 0}
+    neg_comps = {int(comp_labels[ny, nx]) for nx, ny in neg_pixels if int(comp_labels[ny, nx]) > 0}
+    drop_comps = neg_comps - keep_comps
+    if drop_comps:
+        filtered = result & ~np.isin(comp_labels, list(drop_comps))
+        if bool(filtered.any()):
+            return filtered
+    return result
+
+
+def _call_predict_native(
+    image: np.ndarray,
+    event: Mapping[str, Any],
+    *,
+    mask_input: np.ndarray | None = None,
+    **options: Any,
+) -> np.ndarray:
+    if mask_input is not None:
+        try:
+            params = inspect.signature(_predict_native).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "mask_input" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return np.asarray(_predict_native(image, event, mask_input=mask_input, **options), dtype=bool)
+    return np.asarray(_predict_native(image, event, **options), dtype=bool)
+
+
 def calculate_frame(
     images: np.ndarray,
     parsed: Mapping[str, Any],
@@ -365,17 +578,32 @@ def calculate_frame(
         for ref in item.get("refinements", [])
         if int(ref.get("frame", -1)) == frame
     ]
-    keep_existing_mask = bool(
+    source_digest = _source_digest(images, normalize=interactive)
+    prompt_digest = _prompt_digest(prompts, frame)
+    cache_identity = (source_digest, int(frame), prompt_digest, box)
+    has_only_unresolved_shape = bool(
         refinements_on_frame
         and not any(f == frame for f in object_frames_expected)
         and not any(1 in ref.get("labels", []) for ref in refinements_on_frame)
     )
-    source_digest = _source_digest(images, normalize=interactive)
-    prompt_digest = _prompt_digest(prompts, frame)
-    cache_identity = (source_digest, int(frame), prompt_digest, box)
     with _CACHE_LOCK:
         for cached in _SEED_CACHE.values():
             if (cached.source_digest, cached.frame, cached.prompt_digest, cached.box) == cache_identity:
+                prior_available = has_only_unresolved_shape and any(
+                    _lookup_prior_frame_mask(
+                        source_digest,
+                        int(item.get("object_id", idx + 1)),
+                        frame,
+                        tuple(int(value) for value in images[frame].shape[:2]),
+                        allow_combined_fallback=(len(selected_prompts) == 1),
+                    )
+                    is not None
+                    for idx, item in enumerate(selected_prompts)
+                    for ref in item.get("refinements", [])
+                    if int(ref.get("frame", -1)) == frame
+                )
+                if prior_available and not bool(cached.mask.any()):
+                    break
                 _SEED_CACHE.move_to_end(cached.token)
                 mask = np.asarray(cached.mask, dtype=bool).copy()
                 cached_obj_frames = list(cached.object_frames) if cached.object_frames else [frame]
@@ -388,7 +616,7 @@ def calculate_frame(
                     "direction": "forward",
                     "computed_frames": computed_frames,
                 }
-                if keep_existing_mask:
+                if has_only_unresolved_shape and not bool(mask.any()):
                     meta["keep_existing_mask"] = True
                 return mask, cached, meta
     expected = tuple(int(value) for value in images[frame].shape[:2])
@@ -400,11 +628,20 @@ def calculate_frame(
             for idx, (key, object_mask) in enumerate(cached.objects):
                 c_frame = cached.object_frames[idx] if idx < len(cached.object_frames) else cached.frame
                 recent_masks[(int(c_frame), key)] = object_mask
+        recent_ref_masks = {
+            (r_oid, r_frm, r_key): r_mask.copy()
+            for (r_src, r_oid, r_frm, r_key), r_mask in _REF_MASK_CACHE.items()
+            if r_src == source_digest
+        }
+    refinement_masks: list[tuple[int, int, np.ndarray]] = []
+    unresolved_neg_only = False
+    refined_on_frame_objects: set[int] = set()
     try:
         options = {"keep_loaded": True} if interactive else {}
         object_masks = []
         object_frames: list[int] = []
         mask = np.zeros(expected, dtype=bool)
+        selected_frame_img = None
         for index, item in enumerate(selected_prompts, start=1):
             _throw_interrupted()
             obj_frame = int(item.get("frame", frame))
@@ -415,7 +652,7 @@ def calculate_frame(
                 obj_image = images[obj_frame]
                 if interactive:
                     obj_image = np.nan_to_num(obj_image.astype(np.float32, copy=False), nan=0.0, posinf=1.0, neginf=0.0)
-                object_mask = np.asarray(_predict_native(obj_image, primary_item, **options), dtype=bool)
+                object_mask = _call_predict_native(obj_image, primary_item, **options)
                 if object_mask.shape != expected or not bool(object_mask.any()):
                     raise SAM3VideoError(f"SAM3 object {index} returned an empty or invalid seed mask")
                 object_mask = object_mask.copy()
@@ -424,26 +661,87 @@ def calculate_frame(
             object_frames.append(obj_frame)
             if obj_frame == frame:
                 np.logical_or(mask, object_mask, out=mask)
-        if any(1 in ref.get("labels", []) for ref in refinements_on_frame):
-            selected_frame_img = images[frame]
-            if interactive:
-                selected_frame_img = np.nan_to_num(selected_frame_img.astype(np.float32, copy=False), nan=0.0, posinf=1.0, neginf=0.0)
-            for ref in refinements_on_frame:
-                if 1 not in ref.get("labels", []):
+        for index, item in enumerate(selected_prompts, start=1):
+            object_id = int(item.get("object_id", index))
+            for ref in item.get("refinements", []):
+                r_frame = int(ref.get("frame", frame))
+                if not 0 <= r_frame < images.shape[0]:
                     continue
-                _throw_interrupted()
-                ref_mask = np.asarray(_predict_native(selected_frame_img, ref, **options), dtype=bool)
-                if ref_mask.shape == expected and bool(ref_mask.any()):
-                    np.logical_or(mask, ref_mask, out=mask)
+                ref_key = _prompt_digest((ref,), r_frame)
+                if r_frame != frame:
+                    cached_ref = recent_ref_masks.get((object_id, r_frame, ref_key))
+                    if cached_ref is not None and cached_ref.shape == expected and bool(cached_ref.any()):
+                        refinement_masks.append((object_id, r_frame, cached_ref.copy()))
+                    continue
+                if selected_frame_img is None:
+                    selected_frame_img = images[frame]
+                    if interactive:
+                        selected_frame_img = np.nan_to_num(selected_frame_img.astype(np.float32, copy=False), nan=0.0, posinf=1.0, neginf=0.0)
+                prior_mask = _lookup_prior_frame_mask(
+                    source_digest,
+                    object_id,
+                    frame,
+                    expected,
+                    allow_combined_fallback=(len(selected_prompts) == 1),
+                )
+                if prior_mask is not None:
+                    _throw_interrupted()
+                    aug_event, clean_prior, auto_pos = _prepare_refinement_prompt(prior_mask, ref)
+                    ref_mask = _call_predict_native(selected_frame_img, aug_event, mask_input=clean_prior, **options)
+                    ref_mask = _drop_negated_disconnected_islands(ref_mask, ref, auto_pos)
+                    if ref_mask.shape == expected and bool(ref_mask.any()):
+                        ref_mask = ref_mask.copy()
+                        refinement_masks.append((object_id, frame, ref_mask))
+                        refined_on_frame_objects.add(object_id)
+                        np.logical_or(mask, ref_mask, out=mask)
+                        with _CACHE_LOCK:
+                            _REF_MASK_CACHE[(source_digest, object_id, frame, ref_key)] = ref_mask
+                            _REF_MASK_CACHE.move_to_end((source_digest, object_id, frame, ref_key))
+                            while len(_REF_MASK_CACHE) > int(MAX_SEEDS) * 4:
+                                _REF_MASK_CACHE.popitem(last=False)
+                elif 1 in ref.get("labels", []):
+                    _throw_interrupted()
+                    ref_mask = _call_predict_native(selected_frame_img, ref, **options)
+                    if ref_mask.shape == expected and bool(ref_mask.any()):
+                        ref_mask = ref_mask.copy()
+                        refinement_masks.append((object_id, frame, ref_mask))
+                        refined_on_frame_objects.add(object_id)
+                        np.logical_or(mask, ref_mask, out=mask)
+                        with _CACHE_LOCK:
+                            _REF_MASK_CACHE[(source_digest, object_id, frame, ref_key)] = ref_mask
+                            _REF_MASK_CACHE.move_to_end((source_digest, object_id, frame, ref_key))
+                            while len(_REF_MASK_CACHE) > int(MAX_SEEDS) * 4:
+                                _REF_MASK_CACHE.popitem(last=False)
+                else:
+                    unresolved_neg_only = True
+        if refined_on_frame_objects and len(selected_prompts) > 1:
+            for index, item in enumerate(selected_prompts, start=1):
+                other_id = int(item.get("object_id", index))
+                if other_id in refined_on_frame_objects or int(item.get("frame", frame)) == frame:
+                    continue
+                other_mask = _lookup_prior_frame_mask(source_digest, other_id, frame, expected, allow_combined_fallback=False)
+                if other_mask is not None and other_mask.shape == expected and bool(other_mask.any()):
+                    np.logical_or(mask, other_mask, out=mask)
         _throw_interrupted()
     except SAM3UnavailableError as exc:
         meta = {"frame_ready": False, "track_ready": False, "frame": frame,
                 "seed_token": "", "direction": "forward", "computed_frames": [],
                 "error": str(exc)}
         raise SAM3VideoError(str(exc), meta=meta) from exc
+    keep_existing_mask = bool(unresolved_neg_only and not bool(mask.any()))
     token = _seed_token(source_digest, frame, prompt_digest)
-    seed = SAM3Seed(token, source_digest, tuple(int(v) for v in images.shape), frame,
-                    prompt_digest, box, mask, objects=tuple(object_masks), object_frames=tuple(object_frames))
+    seed = SAM3Seed(
+        token,
+        source_digest,
+        tuple(int(v) for v in images.shape),
+        frame,
+        prompt_digest,
+        box,
+        mask,
+        objects=tuple(object_masks),
+        object_frames=tuple(object_frames),
+        refinement_masks=tuple(refinement_masks),
+    )
     with _CACHE_LOCK:
         _SEED_CACHE[token] = seed
         _SEED_CACHE.move_to_end(token)
@@ -583,6 +881,7 @@ def _native_track(
     start: int,
     end: int,
     direction: str,
+    object_masks_out: dict[int, dict[int, np.ndarray]] | None = None,
 ) -> dict[int, np.ndarray]:
     """Propagate selected objects independently and union them per frame."""
 
@@ -684,41 +983,42 @@ def _native_track(
                     mask=torch.from_numpy(np.asarray(object_mask, dtype=np.float32)),
                 )
                 updated_states[id(tracker_state)] = tracker_state
+            ref_mask_map = {
+                (int(oid), int(rf)): m
+                for oid, rf, m in getattr(seed, "refinement_masks", ())
+            }
+            prepare_feats = getattr(native_video_model, "_prepare_backbone_feats", None)
+            mask_refs: list[tuple[int, int, np.ndarray]] = []
+            point_refs: list[tuple[int, int, Mapping[str, Any]]] = []
+            for index, item in enumerate(prompts, start=1):
+                object_id = int(item.get("object_id", index))
+                for ref in item.get("refinements", []):
+                    r_frame = int(ref.get("frame", seed.frame))
+                    if not int(start) <= r_frame <= int(end):
+                        continue
+                    r_mask = ref_mask_map.get((object_id, r_frame))
+                    if r_mask is not None:
+                        mask_refs.append((object_id, r_frame, r_mask))
+                    else:
+                        point_refs.append((object_id, r_frame, ref))
+            for object_id, r_frame, r_mask in mask_refs:
+                if callable(prepare_feats):
+                    prepare_feats(inference_state, r_frame, False)
+                tracker_states = state_lookup(inference_state, [object_id])
+                if not tracker_states:
+                    continue
+                tracker_state = tracker_states[0]
+                add_new_mask(
+                    inference_state=tracker_state,
+                    frame_idx=int(r_frame),
+                    obj_id=object_id,
+                    mask=torch.from_numpy(np.asarray(r_mask, dtype=np.float32)),
+                )
+                updated_states[id(tracker_state)] = tracker_state
             preflight = getattr(tracker, "propagate_in_video_preflight", None)
             if callable(preflight):
                 for tracker_state in updated_states.values():
                     preflight(tracker_state, run_mem_encoder=True)
-
-            if any(item.get("refinements") for item in prompts):
-                prepare_feats = getattr(native_video_model, "_prepare_backbone_feats", None)
-                add_new_points = getattr(tracker, "add_new_points", None)
-                refined_states = {}
-                for item in prompts:
-                    object_id = int(item.get("object_id", seed.object_id))
-                    for ref in item.get("refinements", []):
-                        r_frame = int(ref.get("frame", seed.frame))
-                        if not int(start) <= r_frame <= int(end):
-                            continue
-                        if callable(prepare_feats):
-                            prepare_feats(inference_state, r_frame, False)
-                        tracker_states = state_lookup(inference_state, [object_id])
-                        if not tracker_states or not callable(add_new_points):
-                            continue
-                        tracker_state = tracker_states[0]
-                        add_new_points(
-                            inference_state=tracker_state,
-                            frame_idx=r_frame,
-                            obj_id=object_id,
-                            points=ref["points"],
-                            labels=ref["labels"],
-                            clear_old_points=True,
-                            rel_coordinates=True,
-                            use_prev_mem_frame=True,
-                        )
-                        refined_states[id(tracker_state)] = tracker_state
-                if callable(preflight):
-                    for tracker_state in refined_states.values():
-                        preflight(tracker_state, run_mem_encoder=True)
 
             _LAST_NATIVE_SEED_STRATEGY = "native_tracker_add_new_mask"
             prompt_frames = sorted({
@@ -734,6 +1034,43 @@ def _native_track(
                 spans.append(("forward", min_f, max(0, int(end) - min_f)))
             if direction in {"backward", "both"}:
                 spans.append(("backward", max_f, max(0, max_f - int(start))))
+
+            if point_refs:
+                for request_direction, start_idx, span in spans:
+                    _throw_interrupted()
+                    warmup_request = {
+                        "type": "propagate_in_video",
+                        "session_id": video_state.session_uuid,
+                        "propagation_direction": request_direction,
+                        "start_frame_index": int(start_idx),
+                        "max_frame_num_to_track": int(span),
+                    }
+                    for _response in model.handle_stream_request(warmup_request):
+                        _throw_interrupted()
+                add_new_points = getattr(tracker, "add_new_points", None)
+                refined_states = {}
+                for object_id, r_frame, ref in point_refs:
+                    if callable(prepare_feats):
+                        prepare_feats(inference_state, r_frame, False)
+                    tracker_states = state_lookup(inference_state, [object_id])
+                    if not tracker_states or not callable(add_new_points):
+                        continue
+                    tracker_state = tracker_states[0]
+                    add_new_points(
+                        inference_state=tracker_state,
+                        frame_idx=r_frame,
+                        obj_id=object_id,
+                        points=ref["points"],
+                        labels=ref["labels"],
+                        clear_old_points=True,
+                        rel_coordinates=True,
+                        use_prev_mem_frame=True,
+                    )
+                    refined_states[id(tracker_state)] = tracker_state
+                if callable(preflight):
+                    for tracker_state in refined_states.values():
+                        preflight(tracker_state, run_mem_encoder=True)
+
             progress_start = min_f if direction == "forward" else int(start)
             progress_end = max_f if direction == "backward" else int(end)
             report = frame_progress("sam3_track", progress_end - progress_start + 1)
@@ -762,6 +1099,11 @@ def _native_track(
                     if combined is not None:
                         index = int(frame_idx)
                         masks[index] = combined
+                        if object_masks_out is not None:
+                            for oid in object_ids:
+                                oid_mask = _select_object_mask(outputs, oid, shape)
+                                if oid_mask is not None:
+                                    object_masks_out.setdefault(int(oid), {})[index] = oid_mask
                         if progress_start <= index <= progress_end and index not in completed:
                             completed.add(index)
                             report(len(completed))
@@ -848,8 +1190,26 @@ def track_video(
         min_f, max_f = prompt_frames[0], prompt_frames[-1]
         raw = np.zeros(images.shape[:3], dtype=np.float32)
         raw[seed.frame] = np.asarray(seed.mask, dtype=np.float32)
+        object_masks_out: dict[int, dict[int, np.ndarray]] = {}
         try:
-            native = _native_track(images, prompts, seed=seed, start=start, end=end, direction=direction)
+            try:
+                track_params = inspect.signature(_native_track).parameters
+            except (TypeError, ValueError):
+                track_params = {}
+            if "object_masks_out" in track_params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in track_params.values()
+            ):
+                native = _native_track(
+                    images,
+                    prompts,
+                    seed=seed,
+                    start=start,
+                    end=end,
+                    direction=direction,
+                    object_masks_out=object_masks_out,
+                )
+            else:
+                native = _native_track(images, prompts, seed=seed, start=start, end=end, direction=direction)
         except SAM3VideoError:
             raise
         except Exception as exc:
@@ -938,6 +1298,28 @@ def track_video(
                     meta["cache_stored"] = True
                     meta.update(sam3_video_cache_info())
                     _RAW_CACHE[cache_key] = (payload, shape, anchors, dict(meta), item_bytes)
+        _store_object_track_mask(source_digest, 0, raw)
+        if object_masks_out:
+            for oid, frame_dict in object_masks_out.items():
+                obj_arr = np.zeros(images.shape[:3], dtype=np.float32)
+                for idx, val in frame_dict.items():
+                    i = int(idx)
+                    if start <= i <= end:
+                        arr_v = np.asarray(val, dtype=np.float32)
+                        if arr_v.shape != obj_arr.shape[1:]:
+                            arr_v = _resize_mask(arr_v, obj_arr.shape[1:])
+                        obj_arr[i] = np.clip(arr_v, 0.0, 1.0)
+                idx_0 = int(oid) - 1
+                if 0 <= idx_0 < len(seed.objects):
+                    o_frame = int(seed.object_frames[idx_0]) if idx_0 < len(seed.object_frames) else int(seed.frame)
+                    if start <= o_frame <= end and o_frame not in frame_dict:
+                        obj_arr[o_frame] = np.maximum(obj_arr[o_frame], np.asarray(seed.objects[idx_0][1], dtype=np.float32))
+                for r_oid, r_frame, r_mask in getattr(seed, "refinement_masks", ()):
+                    if int(r_oid) == int(oid) and start <= int(r_frame) <= end and int(r_frame) not in frame_dict:
+                        obj_arr[int(r_frame)] = np.maximum(obj_arr[int(r_frame)], np.asarray(r_mask, dtype=np.float32))
+                _store_object_track_mask(source_digest, int(oid), obj_arr)
+        elif len(prompts) <= 1:
+            _store_object_track_mask(source_digest, 1, raw)
         return SAM3VideoResult(raw, edit_bases, anchors, meta)
 
 

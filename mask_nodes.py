@@ -370,7 +370,7 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
         "raw_mask": _data_url(_mask_png_payload(drawn, size), "image/png"),
         "edit_base": _data_url(_mask_png_payload(composite_base, size), "image/png"),
     }
-    if seed.objects:
+    if seed.objects or getattr(seed, "refinement_masks", ()):
         from PIL import Image
 
         # Each preview pixel stores up to eight membership bits. This keeps
@@ -382,6 +382,14 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
                 continue
             thumbnail = Image.fromarray(object_mask).resize(size, Image.Resampling.NEAREST)
             membership |= np.asarray(thumbnail, dtype=np.uint8) << index
+        for obj_id, ref_frame, ref_mask in getattr(seed, "refinement_masks", ()):
+            if int(ref_frame) != int(frame):
+                continue
+            bit_index = max(0, int(obj_id) - 1)
+            if bit_index >= 8:
+                continue
+            thumbnail = Image.fromarray(np.asarray(ref_mask, dtype=bool)).resize(size, Image.Resampling.NEAREST)
+            membership |= np.asarray(thumbnail, dtype=np.uint8) << bit_index
         patch["object_map"] = _data_url(_mask_png_payload(membership / 255.0, size), "image/png")
     if sam3_meta.get("keep_existing_mask"):
         patch["keep_existing_mask"] = True

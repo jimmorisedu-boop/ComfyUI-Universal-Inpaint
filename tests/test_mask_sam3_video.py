@@ -308,3 +308,264 @@ def test_multiframe_objects_and_cross_frame_refinements(monkeypatch):
     assert track_calls and track_calls[0][0] == (0, 2)
     assert np.any(res.masks[0, 2:8, 2:10]) and np.any(res.masks[2, 10:16, 15:24])
 
+
+def test_cross_frame_negative_refinement_with_prior_mask_subtracts_hand(monkeypatch):
+    import types
+    import ths_universal_inpaint.mask_sam3 as sam3_mod
+
+    images = _clip(frames=4, height=20, width=30)
+    face = np.zeros((20, 30), dtype=bool)
+    face[2:10, 12:24] = True
+    hand = np.zeros((20, 30), dtype=bool)
+    hand[12:19, 2:9] = True
+    face_and_hand = face | hand
+
+    predict_calls = []
+
+    def fake_predict(_image, event, *, keep_loaded=False, mask_input=None):
+        predict_calls.append((dict(event), None if mask_input is None else mask_input.copy()))
+        if mask_input is not None:
+            # Even if SAM3 leaks back a disconnected island at the negative point,
+            # _drop_negated_disconnected_islands must ensure it is excluded.
+            return face_and_hand.copy()
+        return face.copy()
+
+    video.clear_sam3_video_cache()
+    monkeypatch.setattr(video, "_predict_native", fake_predict)
+
+    # 1. Seed Object 1 on frame 0 and run track_video where frame 2 erroneously includes hand.
+    obj1 = {"frame": 0, "points": [[0.6, 0.3]], "labels": [1]}
+    parsed0 = core.parse_mask_data({"sam3": {"frame": 0, "prompt": obj1}}, len(images))
+    _m0, seed0, _meta0 = video.calculate_frame(images, parsed0, frame=0)
+
+    def fake_track_pass1(imgs, prompts, *, seed, start, end, direction):
+        return {
+            0: face.copy(),
+            1: face.copy(),
+            2: face_and_hand.copy(),
+            3: face_and_hand.copy(),
+        }
+
+    monkeypatch.setattr(video, "_native_track", fake_track_pass1)
+    video.track_video(images, parsed0, frame=0, token=seed0.token, start=0, end=3, direction="both")
+
+    # 2. Now click '-' on the hand on frame 2 (cross-frame negative-only refinement).
+    obj1_neg = {
+        **obj1,
+        "refinements": [{"frame": 2, "points": [[5 / 29.0, 15 / 19.0]], "labels": [0]}],
+    }
+    parsed2 = core.parse_mask_data({"sam3": {"frame": 2, "prompt": obj1_neg}}, len(images))
+    mask2, seed2, meta2 = video.calculate_frame(images, parsed2, frame=2)
+
+    assert not meta2.get("keep_existing_mask"), "prior-conditioned negative refinement must update frame immediately"
+    assert len(predict_calls) == 2
+    ref_event, passed_prior = predict_calls[1]
+    assert passed_prior is not None
+    assert bool(passed_prior[5, 18]) and not bool(passed_prior[15, 5]), "disconnected negated island cleared from mask_input"
+    assert 0 in ref_event["labels"] and 1 in ref_event["labels"], "auto-positive anchor appended on safe foreground"
+    assert bool(mask2[5, 18]) and not bool(mask2[15, 5]), "hand subtracted while face preserved"
+    assert len(seed2.refinement_masks) == 1
+    r_oid, r_frm, r_mask = seed2.refinement_masks[0]
+    assert (r_oid, r_frm) == (1, 2)
+    assert bool(r_mask[5, 18]) and not bool(r_mask[15, 5])
+
+    # 3. Verify _native_track feeds seed2.refinement_masks via add_new_mask on frame 2 (not unconditioned add_new_points).
+    monkeypatch.undo()
+    monkeypatch.setattr(video, "_predict_native", fake_predict)
+    events_log = []
+
+    class FakeTracker:
+        def add_new_mask(self, *, inference_state, frame_idx, obj_id, mask):
+            events_log.append(("add_new_mask", int(obj_id), int(frame_idx), bool(mask[5, 18]), bool(mask[15, 5])))
+
+        def add_new_points(self, **kwargs):
+            events_log.append(("add_new_points", kwargs.get("frame_idx")))
+
+        def propagate_in_video_preflight(self, state, run_mem_encoder=True):
+            events_log.append(("preflight", bool(run_mem_encoder)))
+
+    class FakeModel:
+        def __init__(self):
+            self.model = types.SimpleNamespace(
+                tracker=FakeTracker(),
+                _get_tracker_inference_states_by_obj_ids=lambda st, ids: [{"obj_id": ids[0]}],
+                _prepare_backbone_feats=lambda st, f, rev: events_log.append(("prepare_feats", int(f))),
+            )
+
+        def handle_stream_request(self, request):
+            events_log.append(("propagate", request["propagation_direction"], request["start_frame_index"]))
+            for idx in range(4):
+                yield {"frame_index": idx, "outputs": {"obj_ids": np.array([1]), "out_binary_masks": face[None, ...]}}
+
+    fake_video_state = types.SimpleNamespace(
+        num_frames=4,
+        prompts=[1],
+        session_uuid="sess-1",
+        temp_dir=None,
+        with_prompt=lambda p: fake_video_state,
+    )
+    fake_vmod = types.SimpleNamespace(
+        create_video_state=lambda video_frames, config: fake_video_state,
+        cleanup_temp_dir=lambda d: None,
+    )
+    fake_reconstructor = types.SimpleNamespace(
+        get_inference_state=lambda m, vs: {"tracker_inference_states": [{}]},
+    )
+    fake_prompt_cls = types.SimpleNamespace(
+        create_point=lambda f, oid, pts, lbls: (f, oid),
+        create_box=lambda f, oid, box, is_positive=True: (f, oid),
+    )
+    fake_cache = types.SimpleNamespace(get_or_build_model=lambda cfg: FakeModel())
+    monkeypatch.setattr(video, "_native_video_modules", lambda: (fake_vmod, fake_reconstructor, fake_prompt_cls, lambda: {}))
+    monkeypatch.setattr(video, "_native_model_cache_module", lambda: fake_cache)
+    monkeypatch.setattr(video, "_native_config", lambda: {})
+    monkeypatch.setattr(video, "_offload_model", lambda m: None)
+    monkeypatch.setitem(sys.modules, "comfy", types.SimpleNamespace(model_management=types.SimpleNamespace(load_models_gpu=lambda models: None)))
+    monkeypatch.setitem(sys.modules, "comfy.model_management", sys.modules["comfy"].model_management)
+
+    per_obj = {}
+    out = video._native_track(
+        images,
+        video._prompt_events(parsed2, 2),
+        seed=seed2,
+        start=0,
+        end=3,
+        direction="both",
+        object_masks_out=per_obj,
+    )
+    assert ("add_new_mask", 1, 0, True, False) in events_log
+    assert ("add_new_mask", 1, 2, True, False) in events_log
+    assert not any(ev[0] == "add_new_points" for ev in events_log)
+    assert 1 in per_obj and 2 in per_obj[1]
+    assert set(out.keys()) == {0, 1, 2, 3}
+    assert sam3_mod is not None
+
+
+def test_cold_cache_cross_frame_negative_refinement_warms_up_before_add_new_points(monkeypatch):
+    import types
+
+    images = _clip(frames=4, height=20, width=30)
+    face = np.zeros((20, 30), dtype=bool)
+    face[2:10, 12:24] = True
+    video.clear_sam3_video_cache()
+    monkeypatch.setattr(video, "_predict_native", lambda img, ev, **kw: face.copy())
+
+    obj1_neg = {
+        "frame": 0,
+        "points": [[0.6, 0.3]],
+        "labels": [1],
+        "refinements": [{"frame": 2, "points": [[0.15, 0.75]], "labels": [0]}],
+    }
+    parsed = core.parse_mask_data({"sam3": {"frame": 2, "prompt": obj1_neg}}, len(images))
+    _mask, seed, meta = video.calculate_frame(images, parsed, frame=2)
+    assert meta.get("keep_existing_mask") is True
+    assert seed.refinement_masks == ()
+
+    events_log = []
+
+    class FakeTracker:
+        def add_new_mask(self, *, inference_state, frame_idx, obj_id, mask):
+            events_log.append(("add_new_mask", int(frame_idx)))
+
+        def add_new_points(self, **kwargs):
+            events_log.append(("add_new_points", int(kwargs["frame_idx"]), bool(kwargs.get("use_prev_mem_frame"))))
+
+        def propagate_in_video_preflight(self, state, run_mem_encoder=True):
+            events_log.append(("preflight", bool(run_mem_encoder)))
+
+    class FakeModel:
+        def __init__(self):
+            self.model = types.SimpleNamespace(
+                tracker=FakeTracker(),
+                _get_tracker_inference_states_by_obj_ids=lambda st, ids: [{"obj_id": ids[0]}],
+                _prepare_backbone_feats=lambda st, f, rev: events_log.append(("prepare_feats", int(f))),
+            )
+
+        def handle_stream_request(self, request):
+            events_log.append(("propagate", request["propagation_direction"]))
+            for idx in range(4):
+                yield {"frame_index": idx, "outputs": {"obj_ids": np.array([1]), "out_binary_masks": face[None, ...]}}
+
+    fake_video_state = types.SimpleNamespace(
+        num_frames=4,
+        prompts=[1],
+        session_uuid="sess-cold",
+        temp_dir=None,
+        with_prompt=lambda p: fake_video_state,
+    )
+    fake_vmod = types.SimpleNamespace(
+        create_video_state=lambda video_frames, config: fake_video_state,
+        cleanup_temp_dir=lambda d: None,
+    )
+    fake_reconstructor = types.SimpleNamespace(
+        get_inference_state=lambda m, vs: {"tracker_inference_states": [{}]},
+    )
+    fake_prompt_cls = types.SimpleNamespace(
+        create_point=lambda f, oid, pts, lbls: (f, oid),
+        create_box=lambda f, oid, box, is_positive=True: (f, oid),
+    )
+    fake_cache = types.SimpleNamespace(get_or_build_model=lambda cfg: FakeModel())
+    monkeypatch.setattr(video, "_native_video_modules", lambda: (fake_vmod, fake_reconstructor, fake_prompt_cls, lambda: {}))
+    monkeypatch.setattr(video, "_native_model_cache_module", lambda: fake_cache)
+    monkeypatch.setattr(video, "_native_config", lambda: {})
+    monkeypatch.setattr(video, "_offload_model", lambda m: None)
+    monkeypatch.setitem(sys.modules, "comfy", types.SimpleNamespace(model_management=types.SimpleNamespace(load_models_gpu=lambda models: None)))
+    monkeypatch.setitem(sys.modules, "comfy.model_management", sys.modules["comfy"].model_management)
+
+    video._native_track(images, video._prompt_events(parsed, 2), seed=seed, start=0, end=3, direction="forward")
+    first_prop = next(i for i, e in enumerate(events_log) if e[0] == "propagate")
+    add_pts_idx = next(i for i, e in enumerate(events_log) if e[0] == "add_new_points")
+    last_prop = max(i for i, e in enumerate(events_log) if e[0] == "propagate")
+    assert first_prop < add_pts_idx < last_prop, f"expected warmup propagate -> add_new_points -> final propagate, got {events_log}"
+    assert ("add_new_points", 2, True) in events_log
+
+
+def test_predict_native_ranks_candidate_excluding_negative_points_above_higher_score(monkeypatch):
+    import types
+    import torch
+    import ths_universal_inpaint.mask_sam3 as sam3_mod
+
+    image = np.zeros((20, 30, 3), dtype=np.float32)
+    face = np.zeros((20, 30), dtype=np.float32)
+    face[2:10, 12:24] = 1.0
+    hand = np.zeros((20, 30), dtype=np.float32)
+    hand[12:19, 2:9] = 1.0
+    both = np.maximum(face, hand)
+    seen = {}
+
+    class FakePredictor:
+        def __init__(self):
+            w = torch.zeros((1, 1, 2, 2), dtype=torch.float32)
+            self.inst_interactive_predictor = types.SimpleNamespace(
+                model=types.SimpleNamespace(
+                    sam_prompt_encoder=types.SimpleNamespace(
+                        mask_input_size=(16, 16),
+                        mask_downscaling=[types.SimpleNamespace(weight=w)],
+                    )
+                )
+            )
+
+        def predict_inst(self, state, *, point_coords=None, point_labels=None, box=None, mask_input=None, multimask_output=True, normalize_coords=True):
+            seen["mask_input_shape"] = None if mask_input is None else tuple(mask_input.shape)
+            # Candidate 0 has higher score (0.95) but STILL covers the negative hand point;
+            # Candidate 1 has lower score (0.81) and excludes the negative hand point.
+            return np.stack([both, face], axis=0), np.array([0.95, 0.81], dtype=np.float32), None
+
+    fake_model = types.SimpleNamespace(
+        processor=types.SimpleNamespace(
+            set_image=lambda pil: {"img": pil},
+            model=FakePredictor(),
+        )
+    )
+    monkeypatch.setattr(sam3_mod, "_native_config", lambda: {})
+    monkeypatch.setattr(sam3_mod, "_native_model_cache_module", lambda: types.SimpleNamespace(get_or_build_model=lambda cfg: fake_model))
+    monkeypatch.setattr(sam3_mod, "_offload_model", lambda m: None)
+    monkeypatch.setitem(sys.modules, "comfy", types.SimpleNamespace(model_management=types.SimpleNamespace(load_models_gpu=lambda models: None)))
+    monkeypatch.setitem(sys.modules, "comfy.model_management", sys.modules["comfy"].model_management)
+
+    event = {"points": [[18 / 29.0, 5 / 19.0], [5 / 29.0, 15 / 19.0]], "labels": [1, 0]}
+    selected = sam3_mod._predict_native(image, event, mask_input=(face > 0.5))
+    assert seen["mask_input_shape"] == (1, 16, 16)
+    assert bool(selected[5, 18]) and not bool(selected[15, 5])
+
+
