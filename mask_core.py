@@ -360,6 +360,451 @@ def optical_flow_available() -> bool:
     return cv2 is not None
 
 
+def _crop_int(value: Any, label: str, *, minimum: int = 0, maximum: int = 1 << 20) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise MaskDataError(f"{label} must be an integer")
+    integer = int(round(float(value)))
+    if not minimum <= integer <= maximum:
+        raise MaskDataError(f"{label} must be between {minimum} and {maximum}")
+    return integer
+
+
+def normalize_crop_settings(raw: Any) -> dict[str, Any] | None:
+    """Validate optional mask-aware autocrop settings from mask_data['crop']."""
+
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise MaskDataError("mask_data.crop must be an object")
+    mode = str(raw.get("mode", "full"))
+    if mode not in {"full", "auto", "manual"}:
+        raise MaskDataError("mask_data.crop.mode must be full, auto, or manual")
+    margin = _crop_int(raw.get("margin", 64), "mask_data.crop.margin", minimum=0, maximum=4096)
+    multiple = _crop_int(raw.get("multiple", 1), "mask_data.crop.multiple", minimum=1, maximum=512)
+    result: dict[str, Any] = {"mode": mode, "margin": margin, "multiple": multiple}
+    if raw.get("box") is not None:
+        raw_box = raw.get("box")
+        if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
+            raise MaskDataError("mask_data.crop.box must be a 4-element list")
+        box = [_crop_int(item, f"mask_data.crop.box[{i}]", minimum=-4096, maximum=65536) for i, item in enumerate(raw_box)]
+        if box[2] <= box[0] or box[3] <= box[1]:
+            raise MaskDataError("mask_data.crop.box must have positive width and height")
+        result["box"] = box
+    if raw.get("size") is not None:
+        raw_size = raw.get("size")
+        if not isinstance(raw_size, (list, tuple)) or len(raw_size) != 2:
+            raise MaskDataError("mask_data.crop.size must be [width, height]")
+        size = [_crop_int(item, f"mask_data.crop.size[{i}]", minimum=1, maximum=65536) for i, item in enumerate(raw_size)]
+        result["size"] = size
+    return result
+
+
+def mask_extent(mask: np.ndarray) -> dict[str, Any] | None:
+    """Return half-open pixel bounding box and non-empty frame indices across a mask sequence."""
+
+    if hasattr(mask, "detach"):
+        mask = mask.detach().to(device="cpu").numpy()
+    array = np.asarray(mask, dtype=np.float32)
+    if array.ndim == 2:
+        array = array[None, ...]
+    if array.ndim != 3:
+        raise MaskDataError("mask must have shape T x H x W")
+    count, height, width = map(int, array.shape)
+    active: list[int] = []
+    left, top = width, height
+    right = bottom = 0
+    for index, frame in enumerate(array):
+        pixels = frame > 1e-5
+        rows = np.flatnonzero(pixels.any(axis=1))
+        if not rows.size:
+            continue
+        cols = np.flatnonzero(pixels.any(axis=0))
+        active.append(index)
+        left = min(left, int(cols[0]))
+        top = min(top, int(rows[0]))
+        right = max(right, int(cols[-1]) + 1)
+        bottom = max(bottom, int(rows[-1]) + 1)
+    return {"box": [left, top, right, bottom], "frames": active} if active else None
+
+
+def _fit_crop_axis(lo: int, hi: int, limit: int, multiple: int = 1) -> tuple[int, int]:
+    min_size = min(limit, max(1, min(128, limit // 3)))
+    raw_size = min(limit, max(min_size, hi - lo))
+    if multiple > 1:
+        max_mult = (limit // multiple) * multiple
+        if max_mult >= multiple:
+            rounded = ((raw_size + multiple - 1) // multiple) * multiple
+            size = min(max_mult, max(multiple, rounded))
+        else:
+            size = limit
+    else:
+        size = raw_size
+    start = max(0, min(limit - size, (lo + hi - size) // 2))
+    return start, start + size
+
+
+def plan_crop_window(
+    shape: tuple[int, int, int],
+    extent: Mapping[str, Any] | None,
+    crop_opts: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compute a canvas-safe spatial crop window from the mask extent and crop settings."""
+
+    count, height, width = map(int, shape)
+    opts = normalize_crop_settings(crop_opts) or {"mode": "full", "margin": 64, "multiple": 1}
+    mode = opts["mode"]
+    margin = int(opts["margin"])
+    multiple = int(opts.get("multiple", 1))
+    if mode == "full" or not extent or not extent.get("frames"):
+        left, top, right, bottom = 0, 0, width, height
+    else:
+        x, y, r, b = map(int, extent["box"])
+        left, top, right, bottom = x - margin, y - margin, r + margin, b + margin
+        if mode == "manual" and opts.get("box") and opts.get("size") == [width, height]:
+            u, v, s, t = map(int, opts["box"])
+            left, top, right, bottom = min(x, u), min(y, v), max(r, s), max(b, t)
+        left, right = _fit_crop_axis(max(0, left), min(width, right), width, multiple)
+        top, bottom = _fit_crop_axis(max(0, top), min(height, bottom), height, multiple)
+        if mode == "auto" and (right - left) * (bottom - top) >= 0.90 * width * height:
+            if multiple > 1:
+                max_w = (width // multiple) * multiple or width
+                max_h = (height // multiple) * multiple or height
+                left = max(0, min(width - max_w, (x + r - max_w) // 2))
+                right = left + max_w
+                top = max(0, min(height - max_h, (y + b - max_h) // 2))
+                bottom = top + max_h
+            else:
+                left, top, right, bottom = 0, 0, width, height
+    frames = list(extent["frames"]) if extent and extent.get("frames") else []
+    active_range = [int(frames[0]), int(frames[-1]) + 1] if frames else [0, count]
+    return {
+        "mode": mode,
+        "margin": margin,
+        "multiple": multiple,
+        "box": [int(left), int(top), int(right), int(bottom)],
+        "width": int(right - left),
+        "height": int(bottom - top),
+        "source_width": width,
+        "source_height": height,
+        "active_frames": active_range,
+        "total_frames": count,
+    }
+
+
+_RESIZE_METHODS = ("lanczos", "bicubic", "bilinear", "area", "nearest")
+_COLOR_MATCH_MODES = ("none", "mean_std")
+
+
+def _require_int(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise MaskDataError(f"{name} must be an integer")
+    return int(value)
+
+
+def parse_crop_info(
+    crop_info: Any,
+    orig_h: int | None = None,
+    orig_w: int | None = None,
+) -> dict[str, Any]:
+    if isinstance(crop_info, str):
+        try:
+            payload = json.loads(crop_info)
+        except (TypeError, ValueError) as exc:
+            raise MaskDataError("crop_info must be valid JSON") from exc
+    elif isinstance(crop_info, dict):
+        payload = crop_info
+    else:
+        raise MaskDataError("crop_info must be a JSON string or mapping")
+
+    if not isinstance(payload, dict):
+        raise MaskDataError("crop_info must be a JSON object")
+
+    raw_box = payload.get("box")
+    if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
+        raise MaskDataError("crop_info.box must be a 4-element [left, top, right, bottom] list")
+
+    left = _require_int(raw_box[0], "crop_info.box[0]")
+    top = _require_int(raw_box[1], "crop_info.box[1]")
+    right = _require_int(raw_box[2], "crop_info.box[2]")
+    bottom = _require_int(raw_box[3], "crop_info.box[3]")
+
+    if "source_width" in payload:
+        source_width = _require_int(payload["source_width"], "crop_info.source_width")
+    elif orig_w is not None:
+        source_width = _require_int(orig_w, "orig_w")
+    else:
+        raise MaskDataError("crop_info missing source_width")
+
+    if "source_height" in payload:
+        source_height = _require_int(payload["source_height"], "crop_info.source_height")
+    elif orig_h is not None:
+        source_height = _require_int(orig_h, "orig_h")
+    else:
+        raise MaskDataError("crop_info missing source_height")
+
+    if orig_w is not None and source_width != int(orig_w):
+        raise MaskDataError(
+            f"crop_info.source_width ({source_width}) does not match original_images width ({orig_w})"
+        )
+    if orig_h is not None and source_height != int(orig_h):
+        raise MaskDataError(
+            f"crop_info.source_height ({source_height}) does not match original_images height ({orig_h})"
+        )
+
+    if source_width <= 0 or source_height <= 0:
+        raise MaskDataError("crop_info source dimensions must be positive")
+    if left < 0 or top < 0 or right > source_width or bottom > source_height or left >= right or top >= bottom:
+        raise MaskDataError(
+            f"crop_info.box [{left}, {top}, {right}, {bottom}] is invalid for {source_width}x{source_height}"
+        )
+
+    active_raw = payload.get("active_frames")
+    active_frames: list[int] | None = None
+    if active_raw is not None:
+        if not isinstance(active_raw, (list, tuple)) or len(active_raw) != 2:
+            raise MaskDataError("crop_info.active_frames must be a [start, end] pair")
+        start_frame = _require_int(active_raw[0], "crop_info.active_frames[0]")
+        end_frame = _require_int(active_raw[1], "crop_info.active_frames[1]")
+        if start_frame < 0 or end_frame < start_frame:
+            raise MaskDataError("crop_info.active_frames must satisfy 0 <= start <= end")
+        active_frames = [start_frame, end_frame]
+
+    return {
+        "mode": str(payload.get("mode") or "auto"),
+        "margin": int(payload.get("margin", 0)),
+        "multiple": int(payload.get("multiple", 1)),
+        "box": [left, top, right, bottom],
+        "width": right - left,
+        "height": bottom - top,
+        "source_width": source_width,
+        "source_height": source_height,
+        "active_frames": active_frames,
+        "total_frames": int(payload["total_frames"]) if payload.get("total_frames") is not None else None,
+    }
+
+
+def _resize_hw(array: np.ndarray, target_h: int, target_w: int, method: str = "lanczos") -> np.ndarray:
+    method_key = str(method or "lanczos").strip().lower()
+    if method_key not in _RESIZE_METHODS:
+        raise MaskDataError(f"Unsupported resize_method: {method!r}")
+
+    src = np.asarray(array, dtype=np.float32)
+    if src.shape[0] == target_h and src.shape[1] == target_w:
+        return np.clip(src, 0.0, 1.0).astype(np.float32, copy=False)
+
+    if cv2 is not None:
+        interp_map = {
+            "lanczos": cv2.INTER_LANCZOS4,
+            "bicubic": cv2.INTER_CUBIC,
+            "bilinear": cv2.INTER_LINEAR,
+            "area": cv2.INTER_AREA,
+            "nearest": cv2.INTER_NEAREST,
+        }
+        interp = interp_map[method_key]
+        if src.ndim == 3 and src.shape[2] == 1:
+            resized = cv2.resize(src[:, :, 0], (target_w, target_h), interpolation=interp)[:, :, None]
+        else:
+            resized = cv2.resize(src, (target_w, target_h), interpolation=interp)
+        return np.clip(np.asarray(resized, dtype=np.float32), 0.0, 1.0)
+
+    from PIL import Image
+
+    resample_map = {
+        "lanczos": Image.Resampling.LANCZOS,
+        "bicubic": Image.Resampling.BICUBIC,
+        "bilinear": Image.Resampling.BILINEAR,
+        "area": Image.Resampling.BOX,
+        "nearest": Image.Resampling.NEAREST,
+    }
+    resample = resample_map[method_key]
+    if src.ndim == 2:
+        pil_img = Image.fromarray(src, mode="F")
+        out = np.asarray(pil_img.resize((target_w, target_h), resample=resample), dtype=np.float32)
+        return np.clip(out, 0.0, 1.0)
+
+    channels = [
+        np.asarray(
+            Image.fromarray(src[:, :, ch], mode="F").resize((target_w, target_h), resample=resample),
+            dtype=np.float32,
+        )
+        for ch in range(src.shape[2])
+    ]
+    return np.clip(np.stack(channels, axis=-1), 0.0, 1.0)
+
+
+def _window_edge_mask(
+    height: int,
+    width: int,
+    edge_feather: int,
+    touch_left: bool,
+    touch_top: bool,
+    touch_right: bool,
+    touch_bottom: bool,
+) -> np.ndarray:
+    if edge_feather <= 0:
+        return np.ones((height, width), dtype=np.float32)
+
+    mask_x = np.ones(width, dtype=np.float32)
+    if width > 1 and (not touch_left or not touch_right):
+        rx = min(int(edge_feather), width // 2)
+        if rx > 0:
+            ramp_x = (0.5 - 0.5 * np.cos(np.pi * (np.arange(rx, dtype=np.float32) + 0.5) / rx)).astype(np.float32)
+            if not touch_left:
+                mask_x[:rx] = np.minimum(mask_x[:rx], ramp_x)
+            if not touch_right:
+                mask_x[-rx:] = np.minimum(mask_x[-rx:], ramp_x[::-1])
+
+    mask_y = np.ones(height, dtype=np.float32)
+    if height > 1 and (not touch_top or not touch_bottom):
+        ry = min(int(edge_feather), height // 2)
+        if ry > 0:
+            ramp_y = (0.5 - 0.5 * np.cos(np.pi * (np.arange(ry, dtype=np.float32) + 0.5) / ry)).astype(np.float32)
+            if not touch_top:
+                mask_y[:ry] = np.minimum(mask_y[:ry], ramp_y)
+            if not touch_bottom:
+                mask_y[-ry:] = np.minimum(mask_y[-ry:], ramp_y[::-1])
+
+    return (mask_y[:, None] * mask_x[None, :]).astype(np.float32)
+
+
+def _finite_float_array(array: np.ndarray) -> np.ndarray:
+    arr = np.asarray(array, dtype=np.float32)
+    if not np.isfinite(arr).all():
+        arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
+    return arr
+
+
+def restore_crop_window(
+    original_images: np.ndarray,
+    cropped_images: np.ndarray,
+    crop_info: Any,
+    mask: np.ndarray | None = None,
+    edge_feather: int = 0,
+    resize_method: str = "lanczos",
+    invert_mask: bool = False,
+    color_match: str = "none",
+) -> tuple[np.ndarray, np.ndarray]:
+    orig = _finite_float_array(original_images)
+    crop = _finite_float_array(cropped_images)
+    if orig.ndim != 4:
+        raise MaskDataError("original_images must have shape T x H x W x C")
+    if crop.ndim != 4:
+        raise MaskDataError("cropped_images must have shape T x H x W x C")
+    if orig.shape[0] < 1 or crop.shape[0] < 1:
+        raise MaskDataError("original_images and cropped_images must be non-empty")
+
+    feather_px = int(edge_feather)
+    if feather_px < 0:
+        raise MaskDataError("edge_feather must be >= 0")
+
+    color_mode = str(color_match or "none").strip().lower()
+    if color_mode not in _COLOR_MATCH_MODES:
+        raise MaskDataError(f"Unsupported color_match: {color_match!r}")
+
+    orig_t, orig_h, orig_w, orig_c = orig.shape
+    crop_t, _, _, crop_c = crop.shape
+    info = parse_crop_info(crop_info, orig_h=orig_h, orig_w=orig_w)
+    left, top, right, bottom = info["box"]
+    target_w = right - left
+    target_h = bottom - top
+
+    mask_arr: np.ndarray | None = None
+    mask_is_full = False
+    if mask is not None:
+        mask_arr = _finite_float_array(mask)
+        if mask_arr.ndim == 2:
+            mask_arr = mask_arr[None, :, :]
+        if mask_arr.ndim != 3:
+            raise MaskDataError("mask must have shape T x H x W or H x W")
+        if mask_arr.shape[0] < 1:
+            raise MaskDataError("mask must be non-empty")
+        mask_arr = np.clip(mask_arr, 0.0, 1.0)
+        mask_is_full = mask_arr.shape[1] == orig_h and mask_arr.shape[2] == orig_w
+
+    output = np.clip(orig, 0.0, 1.0).copy()
+    applied_mask = np.zeros((orig_t, orig_h, orig_w), dtype=np.float32)
+
+    active = info.get("active_frames")
+    if active is not None:
+        start_frame = max(0, min(active[0], orig_t))
+        end_frame = max(start_frame, min(active[1], orig_t))
+    else:
+        start_frame, end_frame = 0, orig_t
+
+    span = end_frame - start_frame
+    if span <= 0:
+        return output, applied_mask
+
+    write_count = span if crop_t == 1 else min(crop_t, span)
+    window_edge = _window_edge_mask(
+        target_h,
+        target_w,
+        feather_px,
+        touch_left=(left == 0),
+        touch_top=(top == 0),
+        touch_right=(right == orig_w),
+        touch_bottom=(bottom == orig_h),
+    )
+    blend_c = min(orig_c, crop_c)
+
+    for step in range(write_count):
+        orig_idx = start_frame + step
+        crop_idx = 0 if crop_t == 1 else step
+
+        crop_patch = _resize_hw(crop[crop_idx], target_h, target_w, method=resize_method)
+        orig_patch = output[orig_idx, top:bottom, left:right, :blend_c]
+
+        if mask_arr is None:
+            local_alpha = window_edge
+        else:
+            t_mask = mask_arr.shape[0]
+            if t_mask == 1:
+                m_idx = 0
+            elif mask_is_full and t_mask == orig_t:
+                m_idx = orig_idx
+            else:
+                m_idx = min(step, t_mask - 1)
+
+            raw_m = mask_arr[m_idx]
+            if mask_is_full:
+                local_m = raw_m[top:bottom, left:right]
+            else:
+                local_m = _resize_hw(raw_m, target_h, target_w, method="bilinear")
+
+            if invert_mask:
+                local_m = 1.0 - local_m
+            local_alpha = np.clip(local_m, 0.0, 1.0)
+            if feather_px > 0:
+                local_alpha = local_alpha * window_edge
+
+            if color_mode == "mean_std":
+                border = local_alpha < 0.05
+                if int(np.count_nonzero(border)) >= 16:
+                    crop_rgb = crop_patch[:, :, :blend_c]
+                    orig_b = orig_patch[border]
+                    crop_b = crop_rgb[border]
+                    orig_mean = orig_b.mean(axis=0)
+                    crop_mean = crop_b.mean(axis=0)
+                    orig_std = orig_b.std(axis=0)
+                    crop_std = crop_b.std(axis=0)
+                    scale = np.where(
+                        crop_std > 1e-4,
+                        np.clip(orig_std / np.maximum(crop_std, 1e-4), 0.7, 1.4),
+                        1.0,
+                    )
+                    adjusted = np.clip((crop_rgb - crop_mean) * scale + orig_mean, 0.0, 1.0)
+                    crop_patch = crop_patch.copy()
+                    crop_patch[:, :, :blend_c] = adjusted
+
+        alpha_3d = local_alpha[:, :, None]
+        output[orig_idx, top:bottom, left:right, :blend_c] = (
+            crop_patch[:, :, :blend_c] * alpha_3d + orig_patch * (1.0 - alpha_3d)
+        )
+        applied_mask[orig_idx, top:bottom, left:right] = local_alpha
+
+    return np.clip(output, 0.0, 1.0), np.clip(applied_mask, 0.0, 1.0)
+
+
 def _sam3_prompt(prompt: Any, frame: int, frame_count: int | None, label: str) -> dict[str, Any]:
     if not isinstance(prompt, Mapping):
         raise MaskDataError(f"{label} must be an object")
@@ -630,6 +1075,9 @@ def parse_mask_data(value: Any, frame_count: int | None = None, *, width: int | 
                 if "points" in item and (len(item["points"]) > MAX_SAM3_OBJECT_POINTS or 1 not in item["labels"]):
                     raise MaskDataError(f"SAM3 object requires a positive point and at most {MAX_SAM3_OBJECT_POINTS} points")
         result["sam3"] = sam3
+    crop = normalize_crop_settings(raw.get("crop"))
+    if crop is not None:
+        result["crop"] = crop
     return result
 
 
@@ -1419,7 +1867,8 @@ def build_mask_sequence(images: np.ndarray, mask_data: Any = "{}", *, tracking_m
                         grow: int = 8, feather: int = 4, start_frame: int = 0,
                         end_frame: int = -1, fingerprint: str | None = None,
                         return_edit_bases: bool = False,
-                        return_sam3_meta: bool = False) -> tuple:
+                        return_sam3_meta: bool = False,
+                        return_raw_mask: bool = False) -> tuple:
     """Build a safe ``TxHxW`` mask and return ``(mask, canonical_doc, anchors)``.
 
     Empty or malformed edits never become a full-frame mask: malformed input
@@ -1510,13 +1959,14 @@ def build_mask_sequence(images: np.ndarray, mask_data: Any = "{}", *, tracking_m
     mask = postprocess_mask(raw_mask, grow=grow, feather=feather)
     # Tracking already preserves the painted anchors. Apply edge controls to
     # every frame, including anchors, so keyframes cannot produce hard-edge pops.
-    if return_edit_bases and return_sam3_meta:
-        return mask, parsed, anchors, edit_bases, sam3_meta
+    outputs: list[Any] = [mask, parsed, anchors]
     if return_edit_bases:
-        return mask, parsed, anchors, edit_bases
+        outputs.append(edit_bases)
     if return_sam3_meta:
-        return mask, parsed, anchors, sam3_meta
-    return mask, parsed, anchors
+        outputs.append(sam3_meta)
+    if return_raw_mask:
+        outputs.append(raw_mask)
+    return tuple(outputs)
 
 
 def _image_uint8(image: np.ndarray) -> np.ndarray:
@@ -1655,6 +2105,7 @@ def cache_preview_assets(
     masks: np.ndarray,
     *,
     edit_bases: np.ndarray | None = None,
+    raw_masks: np.ndarray | None = None,
     max_size: int = MAX_PREVIEW_SIZE,
     source_session: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -1674,6 +2125,10 @@ def cache_preview_assets(
         edit_bases = np.asarray(edit_bases)
         if edit_bases.shape != masks.shape:
             raise MaskDataError("preview edit bases must match mask dimensions")
+    if raw_masks is not None:
+        raw_masks = np.asarray(raw_masks)
+        if raw_masks.shape != masks.shape:
+            raise MaskDataError("preview raw masks must match mask dimensions")
     try:
         from PIL import Image  # noqa: F401  # imported for an actionable fallback below
         import folder_paths  # type: ignore
@@ -1709,7 +2164,15 @@ def cache_preview_assets(
                 edit_bytes = None
                 if edit_bases is not None:
                     edit_bytes = _mask_png_payload(edit_bases[frame], size)
-                written += len(source_bytes) + len(mask_bytes) + (len(edit_bytes) if edit_bytes else 0)
+                raw_bytes = None
+                if raw_masks is not None:
+                    raw_bytes = _mask_png_payload(raw_masks[frame], size)
+                written += (
+                    len(source_bytes)
+                    + len(mask_bytes)
+                    + (len(edit_bytes) if edit_bytes else 0)
+                    + (len(raw_bytes) if raw_bytes else 0)
+                )
                 if written > MAX_TEMP_CACHE_SESSION_BYTES:
                     raise RuntimeError(
                         f"all-frame preview cache exceeds {MAX_TEMP_CACHE_SESSION_BYTES} bytes"
@@ -1736,6 +2199,14 @@ def cache_preview_assets(
                     (cache_dir / edit_name).write_bytes(edit_bytes)
                     descriptor["edit_base"] = {
                         "filename": edit_name,
+                        "subfolder": subfolder,
+                        "type": "temp",
+                    }
+                if raw_bytes is not None:
+                    raw_name = f"raw_mask_{frame:06d}.png"
+                    (cache_dir / raw_name).write_bytes(raw_bytes)
+                    descriptor["raw_mask"] = {
+                        "filename": raw_name,
                         "subfolder": subfolder,
                         "type": "temp",
                     }
@@ -1885,7 +2356,9 @@ __all__ = [
     "MAX_RAW_TRACKING_CACHE_ENTRIES", "MAX_RAW_TRACKING_CACHE_BYTES",
     "MAX_RAW_TRACKING_CACHE_ITEM_BYTES", "MAX_RAW_TRACKING_CACHE_SOURCE_BYTES",
     "MaskDataError", "MaskSourceMismatch", "MaskRefinementError",
-    "frame_fingerprint", "optical_flow_available", "parse_mask_data", "canonical_mask_data", "canonicalize_mask_data",
+    "frame_fingerprint", "optical_flow_available", "normalize_crop_settings", "mask_extent", "plan_crop_window",
+    "parse_crop_info", "restore_crop_window",
+    "parse_mask_data", "canonical_mask_data", "canonicalize_mask_data",
     "rasterize_events", "refine_rectangle", "propagate_masks", "postprocess_mask",
     "derive_edit_base_sequence", "build_mask_sequence", "encode_preview_assets", "cache_preview_assets",
     "cache_compare_preview_assets", "clear_raw_tracking_cache", "raw_tracking_cache_info",

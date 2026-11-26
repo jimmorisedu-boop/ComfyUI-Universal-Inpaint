@@ -67,7 +67,7 @@ def test_mask_workflow_wiring_and_no_model_or_h3_references():
 
     editor = nodes["THSUniversalMaskEditor"]
     assert [item["name"] for item in editor["inputs"]] == ["images", "fps"]
-    assert [output["name"] for output in editor["outputs"]] == ["edit_mask", "preview"]
+    assert [output["name"] for output in editor["outputs"]] == ["edit_mask", "preview", "cropped_images", "cropped_mask", "crop_info"]
     assert editor["widgets_values"][1] == "sam3"
     assert editor["size"][0] >= 900 and editor["size"][1] >= 760
 

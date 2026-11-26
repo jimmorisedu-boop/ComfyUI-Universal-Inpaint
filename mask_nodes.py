@@ -8,6 +8,7 @@ actual Comfy execution still returns native IMAGE/MASK tensors.
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from typing import Any
 
@@ -27,11 +28,14 @@ from .mask_core import (
     canonical_mask_data,
     encode_preview_assets,
     frame_fingerprint,
+    mask_extent,
     optical_flow_available,
     parse_mask_data,
+    plan_crop_window,
     postprocess_mask,
     rasterize_events,
     raw_tracking_cache_info,
+    restore_crop_window,
 )
 from .mask_sam3_video import SAM3VideoError, _overlay_events, _prompt_events, calculate_frame
 
@@ -46,6 +50,17 @@ def _image_array(images: Any) -> np.ndarray:
     if images.ndim != 4:
         raise MaskDataError("images must have shape T x H x W x C")
     return images
+
+
+def _mask_array(mask: Any) -> np.ndarray:
+    if hasattr(mask, "detach"):
+        mask = mask.detach().to(device="cpu", dtype=getattr(mask, "dtype", None)).numpy()
+    arr = np.asarray(mask)
+    if arr.ndim == 2:
+        arr = arr[None, :, :]
+    elif arr.ndim != 3:
+        raise MaskDataError("mask must have shape T x H x W or H x W")
+    return arr
 
 
 def _normalize_images(images: np.ndarray) -> np.ndarray:
@@ -112,9 +127,8 @@ def _blocked_source_response(
     installed Comfy runtime provides ``ExecutionBlocker``.
     """
 
-    mask_blocker = _execution_blocker(None)
-    preview_blocker = _execution_blocker(None)
-    if mask_blocker is None or preview_blocker is None:
+    blockers = tuple(_execution_blocker(None) for _ in range(5))
+    if any(item is None for item in blockers):
         raise diagnostic
 
     count, height, width = map(int, source.shape[:3])
@@ -195,7 +209,7 @@ def _blocked_source_response(
             "universal_mask_meta": [meta],
             "universal_mask_status": [status],
         },
-        "result": (mask_blocker, preview_blocker),
+        "result": blockers,
     }
 
 
@@ -236,6 +250,7 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
     patch = {
         "frame": frame,
         "mask": _data_url(_mask_png_payload(mask, size), "image/png"),
+        "raw_mask": _data_url(_mask_png_payload(drawn, size), "image/png"),
         "edit_base": _data_url(_mask_png_payload(base, size), "image/png"),
     }
     if seed.objects:
@@ -251,6 +266,17 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
     bound_source = {"frames": count, "width": width, "height": height, "fingerprint": fingerprint}
     parsed["source"] = bound_source
     sam3["seed_token"] = seed.token
+    extent = mask_extent(mask[None])
+    if extent is not None:
+        extent = {"box": extent["box"], "frames": [int(frame)]}
+    raw_extent = mask_extent(drawn[None])
+    if raw_extent is not None:
+        raw_extent = {"box": raw_extent["box"], "frames": [int(frame)]}
+    applied_postprocess = {
+        "grow": int(max(0, min(256, int(grow)))),
+        "feather": int(max(0, min(256, int(feather)))),
+    }
+    crop_plan = plan_crop_window((count, height, width), extent, parsed.get("crop"))
     meta = {
         "version": 1,
         "source": bound_source,
@@ -262,6 +288,10 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
         "has_mask": bool(np.any(mask > 1e-5)),
         "sam3": sam3_meta,
         "frame_preview_ms": prediction_ms,
+        "crop_extent": extent,
+        "raw_crop_extent": raw_extent,
+        "mask_postprocess": applied_postprocess,
+        "crop_plan": crop_plan,
     }
     return {
         "ui": {
@@ -269,7 +299,7 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
             "universal_mask_meta": [meta],
             "universal_mask_data": [canonical_mask_data(parsed, count, width=width, height=height, fingerprint=fingerprint)],
         },
-        "result": (blocker, blocker),
+        "result": (blocker, blocker, blocker, blocker, blocker),
     }
 
 
@@ -313,9 +343,17 @@ class THSUniversalMaskEditor:
 
     OUTPUT_NODE = True
     FUNCTION = "run"
-    CATEGORY = "Universal Mask Editor"
-    RETURN_TYPES = ("MASK", "IMAGE")
-    RETURN_NAMES = ("edit_mask", "preview")
+    CATEGORY = "DAI/Universal Mask Editor"
+    SEARCH_ALIASES = [
+        "dai",
+        "dai mask",
+        "dai video mask",
+        "dai mask editor",
+        "video mask editor",
+        "universal mask editor",
+    ]
+    RETURN_TYPES = ("MASK", "IMAGE", "IMAGE", "MASK", "STRING")
+    RETURN_NAMES = ("edit_mask", "preview", "cropped_images", "cropped_mask", "crop_info")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -364,7 +402,7 @@ class THSUniversalMaskEditor:
                     if response is not None:
                         return response
             source = _normalize_images(source)
-            mask, parsed, anchors, edit_bases, sam3_meta = build_mask_sequence(
+            mask, parsed, anchors, edit_bases, sam3_meta, raw_mask = build_mask_sequence(
                 source,
                 mask_data,
                 tracking_mode=tracking_mode,
@@ -375,6 +413,7 @@ class THSUniversalMaskEditor:
                 fingerprint=fingerprint,
                 return_edit_bases=True,
                 return_sam3_meta=True,
+                return_raw_mask=True,
             )
         except (MaskSourceMismatch, MaskRefinementError, SAM3VideoError) as exc:
             if editor_frame_preview and not isinstance(exc, MaskSourceMismatch):
@@ -414,10 +453,19 @@ class THSUniversalMaskEditor:
             source,
             mask,
             edit_bases=edit_bases,
+            raw_masks=raw_mask,
             source_session=session,
         )
         raw_cache_info = raw_tracking_cache_info()
         preview = _preview_tensor(source, mask) if preview_output else _execution_blocker(None)
+        extent = mask_extent(mask)
+        raw_extent = mask_extent(raw_mask)
+        applied_postprocess = {
+            "grow": int(max(0, min(256, int(grow)))),
+            "feather": int(max(0, min(256, int(feather)))),
+        }
+        crop_plan = plan_crop_window(mask.shape, extent, parsed.get("crop"))
+        crop_x, crop_y, crop_r, crop_b = crop_plan["box"]
         meta = {
             "version": 1,
             "session": session,
@@ -440,6 +488,10 @@ class THSUniversalMaskEditor:
             "tracking_available": bool(optical_flow_available()),
             "raw_tracking_cache": raw_cache_info,
             "refinement_methods": _refinement_capabilities(),
+            "crop_extent": extent,
+            "raw_crop_extent": raw_extent,
+            "mask_postprocess": applied_postprocess,
+            "crop_plan": crop_plan,
         }
         if str(tracking_mode) == "sam3":
             meta["sam3"] = dict(sam3_meta)
@@ -468,6 +520,9 @@ class THSUniversalMaskEditor:
             "universal_mask_status": [status],
         }
         mask_output: Any = _torch_tensor(mask)
+        cropped_images_out: Any = _torch_tensor(source[:, crop_y:crop_b, crop_x:crop_r])
+        cropped_mask_out: Any = _torch_tensor(mask[:, crop_y:crop_b, crop_x:crop_r])
+        crop_info_out: Any = json.dumps(crop_plan, ensure_ascii=False)
         if not has_mask or (str(tracking_mode) == "sam3" and not bool(sam3_meta.get("track_ready"))):
             blocker = _execution_blocker(
                 "THSUniversalMaskEditor is waiting for a completed SAM3 video track or a non-empty mask."
@@ -476,11 +531,86 @@ class THSUniversalMaskEditor:
             )
             if blocker is not None:
                 mask_output = blocker
-        return {"ui": ui, "result": (mask_output, preview)}
+                cropped_images_out = blocker
+                cropped_mask_out = blocker
+                crop_info_out = blocker
+        return {"ui": ui, "result": (mask_output, preview, cropped_images_out, cropped_mask_out, crop_info_out)}
 
 
-NODE_CLASS_MAPPINGS = {"THSUniversalMaskEditor": THSUniversalMaskEditor}
-NODE_DISPLAY_NAME_MAPPINGS = {"THSUniversalMaskEditor": "Video Mask Editor"}
+class THSUniversalMaskRestoreCrop:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "original_images": ("IMAGE",),
+                "cropped_images": ("IMAGE",),
+                "crop_info": ("STRING", {"forceInput": True}),
+            },
+            "optional": {
+                "mask": ("MASK",),
+                "edge_feather": ("INT", {"default": 0, "min": 0, "max": 256, "step": 1}),
+                "resize_method": (["lanczos", "bicubic", "bilinear", "area", "nearest"], {"default": "lanczos"}),
+                "invert_mask": ("BOOLEAN", {"default": False}),
+                "color_match": (["none", "mean_std"], {"default": "none"}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("image", "mask")
+    FUNCTION = "run"
+    CATEGORY = "DAI/Universal Mask Editor"
+    SEARCH_ALIASES = [
+        "dai",
+        "dai restore",
+        "dai crop",
+        "dai restore crop",
+        "video mask restore crop",
+        "restore crop",
+        "stitch crop",
+    ]
+    OUTPUT_NODE = False
+
+    def run(
+        self,
+        original_images: Any,
+        cropped_images: Any,
+        crop_info: str,
+        mask: Any = None,
+        edge_feather: int = 0,
+        resize_method: str = "lanczos",
+        invert_mask: bool = False,
+        color_match: str = "none",
+    ):
+        orig = _normalize_images(_image_array(original_images))
+        crop = _normalize_images(_image_array(cropped_images))
+        mask_arr = _normalize_images(_mask_array(mask)) if mask is not None else None
+        feather = 0 if edge_feather is None else int(edge_feather)
+        restored, applied_mask = restore_crop_window(
+            orig,
+            crop,
+            crop_info,
+            mask=mask_arr,
+            edge_feather=feather,
+            resize_method=resize_method,
+            invert_mask=bool(invert_mask),
+            color_match=color_match,
+        )
+        return (_torch_tensor(restored), _torch_tensor(applied_mask))
 
 
-__all__ = ["THSUniversalMaskEditor", "NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+NODE_CLASS_MAPPINGS = {
+    "THSUniversalMaskEditor": THSUniversalMaskEditor,
+    "THSUniversalMaskRestoreCrop": THSUniversalMaskRestoreCrop,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "THSUniversalMaskEditor": "DAI Video Mask Editor",
+    "THSUniversalMaskRestoreCrop": "DAI Video Mask Restore Crop",
+}
+
+
+__all__ = [
+    "THSUniversalMaskEditor",
+    "THSUniversalMaskRestoreCrop",
+    "NODE_CLASS_MAPPINGS",
+    "NODE_DISPLAY_NAME_MAPPINGS",
+]

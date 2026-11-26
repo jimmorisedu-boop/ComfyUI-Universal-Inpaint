@@ -1,4 +1,6 @@
 /* global document, window, Image, HTMLElement, IntersectionObserver */
+import { createCropControls } from "./crop_window.js";
+import { createMaskPostprocessor, effectiveCropExtent } from "./mask_postprocess.js";
 import { previewPrompt } from "./preview_prompt.js";
 
 // Universal mask editor for ComfyUI.  This file intentionally has no framework
@@ -21,7 +23,7 @@ const MAX_POINTS_PER_STROKE = 4096;
 const MAX_TOTAL_POINTS = 65536;
 const MAX_PREVIEWS = 48;
 const MAX_HISTORY = 80;
-const EDITOR_BUILD = "20261126-mask-editor-hover-delay";
+const EDITOR_BUILD = "20261126-mask-editor-live-edges";
 const TOOLTIP_SHOW_DELAY_MS = 650;
 const TOOLTIP_WARM_DELAY_MS = 180;
 const SAM3_FRAME_PREVIEW = "sam3_frame_v1";
@@ -748,6 +750,25 @@ function addStyles(root, instanceKey = "editor") {
       }
       .ths-mask-editor .ths-mask-toolbar-sep { display: block; inline-size: 22px; block-size: 0; margin-block: 3px; border-top: 1px solid color-mix(in oklab, ${COLORS.borderSoft} 65%, transparent); }
       .ths-mask-editor .ths-canvas-wrap { position: relative; min-width: 0; min-height: 220px; background: ${COLORS.panel}; border: 1px solid color-mix(in oklab, ${COLORS.borderSoft} 65%, transparent); border-radius: 7px; overflow: hidden; content-visibility: auto; contain-intrinsic-size: auto none auto 340px; }
+      .ths-mask-editor .ths-crop-outline { box-sizing: border-box; position: absolute; z-index: 2; display: none; pointer-events: none; border: 2px dashed #f5b951; border-radius: 2px; box-shadow: inset 0 0 0 1px rgb(13 18 22 / 0.55); }
+      .ths-mask-editor .ths-crop-tag { position: absolute; left: 6px; top: 6px; padding: 2px 7px; border-radius: 4px; background: rgb(13 18 22 / 0.88); border: 1px solid rgb(245 185 81 / 0.65); color: #f5b951; font: 600 11px/1.25 Inter, system-ui, sans-serif; font-variant-numeric: tabular-nums; white-space: nowrap; }
+      .ths-mask-editor .ths-crop-outline button { position: absolute; width: 16px; height: 16px; min-width: 16px; min-height: 16px; padding: 0; border: 2px solid #f5b951; border-radius: 3px; background: #141b20; pointer-events: auto; cursor: nwse-resize; touch-action: none; -webkit-user-select: none; user-select: none; box-shadow: 0 1px 4px rgb(0 0 0 / 0.6); }
+      .ths-mask-editor .ths-crop-nw { left: -2px; top: -2px; }
+      .ths-mask-editor .ths-crop-se { right: -2px; bottom: -2px; }
+      .ths-mask-editor .ths-mask-inspector .ths-crop-mode { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; min-height: 30px; }
+      .ths-mask-editor .ths-mask-inspector .ths-crop-mode select { width: 100%; min-height: 30px; padding: 4px 8px; }
+      .ths-mask-editor .ths-crop-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; min-width: 0; }
+      .ths-mask-editor .ths-crop-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: ${COLORS.muted}; font-size: 11px; line-height: 1.2; }
+      .ths-mask-editor .ths-crop-input-wrap { display: flex; align-items: center; gap: 4px; padding-right: 8px; border-radius: 6px; border: 1px solid color-mix(in oklab, ${COLORS.border} 72%, transparent); background: ${COLORS.input}; transition: border-color 140ms ease-out, opacity 140ms ease-out; }
+      .ths-mask-editor .ths-crop-input-wrap:focus-within { outline: 2px solid ${COLORS.accentStrong}; outline-offset: -1px; }
+      .ths-mask-editor .ths-crop-input-wrap:has(input:disabled) { opacity: 0.45; }
+      .ths-mask-editor .ths-crop-input-wrap input[type="number"] { border: 0; background: transparent; width: 100%; min-width: 0; min-height: 30px; padding: 4px 2px 4px 8px; font-variant-numeric: tabular-nums; }
+      .ths-mask-editor .ths-crop-input-wrap input[type="number"]:focus-visible { outline: none; }
+      .ths-mask-editor .ths-crop-unit { color: ${COLORS.muted}; font-size: 11px; flex: none; user-select: none; }
+      .ths-mask-editor .ths-crop-presets { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; }
+      .ths-mask-editor .ths-crop-presets .ths-crop-preset { min-height: 24px; min-block-size: 24px; padding: 2px 4px; font-size: 11px; line-height: 1.2; border-radius: 5px; font-variant-numeric: tabular-nums; display: inline-flex; align-items: center; justify-content: center; }
+      .ths-mask-editor .ths-crop-presets .ths-crop-preset[aria-pressed="true"] { background: color-mix(in oklab, ${COLORS.mask} 18%, ${COLORS.panel2}); border-color: color-mix(in oklab, ${COLORS.mask} 60%, transparent); color: ${COLORS.mask}; }
+      .ths-mask-editor .ths-crop-readout { min-height: 26px; display: flex; align-items: center; padding: 4px 8px; border-radius: 5px; background: color-mix(in oklab, ${COLORS.input} 70%, black); border: 1px solid color-mix(in oklab, ${COLORS.borderSoft} 55%, transparent); color: ${COLORS.muted}; font-size: 11px; line-height: 1.3; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; }
       .ths-mask-editor .ths-mask-alert-overlay { position: absolute; z-index: 4; inset-block-start: 8px; inset-inline: 8px; display: none; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 8px; background: color-mix(in oklab, ${COLORS.panel} 94%, black); border: 1px solid color-mix(in oklab, ${COLORS.warning} 52%, transparent); box-shadow: 0 6px 20px rgb(0 0 0 / 0.45); color: ${COLORS.text}; font-size: 12px; line-height: 1.4; pointer-events: auto; }
       .ths-mask-editor .ths-mask-alert-overlay[data-state="error"] { border-color: color-mix(in oklab, ${COLORS.danger} 60%, transparent); color: ${COLORS.danger}; }
       .ths-mask-editor .ths-mask-alert-text { margin: 0; }
@@ -764,10 +785,14 @@ function addStyles(root, instanceKey = "editor") {
       .ths-mask-editor .ths-mask-progress-caption { color: ${COLORS.muted}; font-size: 12px; font-variant-numeric: tabular-nums; }
       .ths-mask-editor .ths-mask-progress-time { color: ${COLORS.muted}; font-size: 12px; font-variant-numeric: tabular-nums; }
       .ths-mask-editor .ths-mask-inspector { min-width: 0; min-height: 0; overflow: hidden; background: ${COLORS.panel}; border: 1px solid ${COLORS.borderSoft}; border-radius: 7px; display: flex; flex-direction: column; }
-      .ths-mask-editor .ths-mask-inspector-body { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-gutter: stable; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-      .ths-mask-editor .ths-mask-export { flex: none; padding: 12px 16px; border-top: 1px solid ${COLORS.borderSoft}; }
-      .ths-mask-editor .ths-mask-section { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-      .ths-mask-editor .ths-mask-section + .ths-mask-section { border-top: 1px solid ${COLORS.borderSoft}; padding-block-start: 12px; }
+      .ths-mask-editor .ths-mask-inspector-body { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: color-mix(in oklab, ${COLORS.text} 22%, transparent) transparent; scrollbar-gutter: stable; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+      .ths-mask-editor .ths-mask-inspector-body::-webkit-scrollbar { width: 6px; height: 6px; }
+      .ths-mask-editor .ths-mask-inspector-body::-webkit-scrollbar-track { background: transparent; }
+      .ths-mask-editor .ths-mask-inspector-body::-webkit-scrollbar-thumb { background: color-mix(in oklab, ${COLORS.text} 18%, transparent); border-radius: 999px; }
+      .ths-mask-editor .ths-mask-inspector-body::-webkit-scrollbar-thumb:hover { background: color-mix(in oklab, ${COLORS.text} 32%, transparent); }
+      .ths-mask-editor .ths-mask-export { flex: none; padding: 12px 14px; border-top: 1px solid ${COLORS.borderSoft}; }
+      .ths-mask-editor .ths-mask-section { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+      .ths-mask-editor .ths-mask-section + .ths-mask-section { border-top: 1px solid ${COLORS.borderSoft}; padding-block-start: 10px; }
       .ths-mask-editor .ths-mask-section-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-inline-size: 0; }
       .ths-mask-editor .ths-mask-section-title { margin: 0; color: ${COLORS.text}; font-size: 13px; line-height: 1.4; font-weight: 650; }
       .ths-mask-editor .ths-mask-info-btn { min-inline-size: 24px !important; min-block-size: 24px !important; width: 24px !important; min-width: 24px !important; height: 24px !important; min-height: 24px !important; padding: 3px !important; border: 1px solid transparent !important; background: transparent !important; color: ${COLORS.muted} !important; border-radius: 6px !important; }
@@ -775,10 +800,10 @@ function addStyles(root, instanceKey = "editor") {
       .ths-mask-editor .ths-mask-inspector .ths-mask-label { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 8px; }
       .ths-mask-editor .ths-mask-mode { display: flex !important; flex-direction: column; align-items: stretch; gap: 6px !important; }
       .ths-mask-editor .ths-mask-mode select { width: 100%; }
-      .ths-mask-editor .ths-mask-settings { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-      .ths-mask-editor .ths-mask-settings .ths-mask-label { display: flex; flex-wrap: wrap; gap: 6px; }
-      .ths-mask-editor .ths-mask-settings .ths-mask-label > :first-child { width: 100%; }
-      .ths-mask-editor .ths-mask-settings input { width: 68px; font-variant-numeric: tabular-nums; }
+      .ths-mask-editor .ths-mask-settings { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+      .ths-mask-editor .ths-mask-setting-row { display: grid; grid-template-columns: 48px minmax(64px, 1fr) 54px auto; align-items: center; gap: 6px; width: 100%; min-width: 0; color: ${COLORS.muted}; font-size: 12px; line-height: 1.4; }
+      .ths-mask-editor .ths-mask-setting-row input[type="range"] { width: 100%; min-width: 0; }
+      .ths-mask-editor .ths-mask-setting-row input[type="number"] { width: 54px; min-width: 0; font-variant-numeric: tabular-nums; }
       .ths-mask-editor .ths-tip-wrap { display: block; width: 100%; }
       .ths-mask-editor .ths-tip-wrap > button:disabled { pointer-events: none; }
       .ths-mask-editor .ths-mask-actions { display: flex; flex-direction: column; gap: 8px; }
@@ -797,8 +822,13 @@ function addStyles(root, instanceKey = "editor") {
       .ths-mask-editor .ths-mask-transport .ths-mask-icon-button svg { width: 18px; height: 18px; }
       .ths-mask-editor .ths-mask-timeline-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; white-space: nowrap; color: ${COLORS.muted}; font: 500 11px/1.2 Inter, Arial, sans-serif; font-variant-numeric: tabular-nums; }
       .ths-mask-editor .ths-mask-key-readout { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .ths-mask-editor .ths-mask-secondary { display: flex; flex-wrap: wrap; gap: 6px; }
-      .ths-mask-editor .ths-mask-secondary .ths-mask-button { font-size: 11px; padding: 6px 8px; min-block-size: 30px; min-height: 30px; }
+      .ths-mask-editor .ths-mask-secondary { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; width: 100%; }
+      .ths-mask-editor .ths-mask-secondary .ths-mask-button { width: 100%; display: inline-flex; align-items: center; justify-content: center; font-size: 11.5px; padding: 6px 8px; min-block-size: 32px; min-height: 32px; border-radius: 6px; overflow: hidden; text-overflow: ellipsis; }
+      .ths-mask-editor .ths-mask-secondary .ths-mask-btn-wide { grid-column: 1 / -1; }
+      .ths-mask-editor .ths-mask-secondary .ths-mask-button-danger { background: color-mix(in oklab, ${COLORS.danger} 8%, ${COLORS.panel2}); border-color: color-mix(in oklab, ${COLORS.danger} 34%, transparent); }
+      @media (hover: hover) {
+        .ths-mask-editor .ths-mask-secondary .ths-mask-button-danger:hover:not(:disabled) { background: color-mix(in oklab, ${COLORS.danger} 16%, ${COLORS.panel2}); border-color: color-mix(in oklab, ${COLORS.danger} 58%, transparent); }
+      }
       .ths-mask-editor .ths-key-marker { width: 14px; height: 22px; min-height: 22px; padding: 0; border: 0; border-radius: 2px; background: transparent; position: absolute; top: -4px; transform: translateX(-50%); }
       .ths-mask-editor .ths-key-marker::before { content: ''; display: block; width: 3px; height: 14px; margin: 4px auto; border-radius: 1px; background: ${COLORS.mask}; }
       ${scopeSelector} [data-tooltip][data-ths-tip-active="true"] { anchor-name: ${tipAnchor}; }
@@ -1109,16 +1139,27 @@ export function createUniversalMaskEditor(node, options = {}) {
     const directionLabel = labelControl("Направление", directionSelect);
 
     const maskSettingsInputs = {};
+    const maskSettingsRanges = {};
     const maskSettingsDefaults = { grow: 8, feather: 4 };
     for (const [name, label, description] of [["grow", "Grow", "Расширение маски"], ["feather", "Feather", "Растушёвка края маски"]]) {
+        const row = createElement("div", {}, "ths-mask-setting-row");
+        const title = document.createElement("span");
+        title.textContent = label;
+        const range = document.createElement("input");
+        range.type = "range"; range.min = "0"; range.max = "256"; range.step = "1";
+        range.value = String(maskSettingsDefaults[name]);
+        range.setAttribute("aria-label", `Ползунок ${label}`);
+        assignTooltipMetadata(range, `${description}, 0–256 пикселей.`);
+        syncSliderMetrics(range, `${maskSettingsDefaults[name]} px`);
         const input = document.createElement("input");
         input.type = "number"; input.min = "0"; input.max = "256"; input.step = "1";
-        input.style.width = "60px";
         input.setAttribute("aria-label", label);
         assignTooltipMetadata(input, `${description}, 0–256 пикселей.`);
         const unit = createElement("span", { color: COLORS.muted, fontSize: "11px" }); unit.textContent = "px";
         maskSettingsInputs[name] = input;
-        maskSettingsGroup.append(labelControl(label, input, unit));
+        maskSettingsRanges[name] = range;
+        row.append(title, range, input, unit);
+        maskSettingsGroup.append(row);
     }
     viewRow.append(maskSettingsGroup);
     const refine = button("Выделять объект");
@@ -1180,8 +1221,9 @@ export function createUniversalMaskEditor(node, options = {}) {
     const redo = iconButton("Повторить", "redo", "Повторить · Ctrl+Shift+Z / Ctrl+Y"); assignTooltipMetadata(redo, "Повторить · Ctrl+Shift+Z / Ctrl+Y", { side: "inline-end" });
     const clear = button("Очистить кадр"); assignTooltipMetadata(clear, "Удалить правки и выделение на текущем кадре");
     const copyPrevious = button("Скопировать предыдущий ключ"); assignTooltipMetadata(copyPrevious, "Скопировать маску с предыдущего ключевого кадра на текущий");
+    copyPrevious.className += " ths-mask-btn-wide";
     const reset = button("Сбросить маску", "danger"); assignTooltipMetadata(reset, "Очистить всю маску клипа (можно отменить через Ctrl+Z)");
-    actionRow.append(undo, redo, clear, copyPrevious, reset);
+    actionRow.append(undo, redo, copyPrevious, clear, reset);
     root.append(actionRow);
 
     const rangeRow = createElement("div", { display: "flex", alignItems: "center", flexWrap: "wrap", gap: "7px", color: COLORS.muted, font: "500 11px/1.2 Inter, Arial, sans-serif" });
@@ -1537,6 +1579,7 @@ export function createUniversalMaskEditor(node, options = {}) {
     const ctx = canvas.getContext?.("2d");
     const maskCanvas = document.createElement("canvas");
     const maskCtx = maskCanvas.getContext?.("2d");
+    const maskPostprocessor = createMaskPostprocessor();
     const documentState = readDocument(node);
     const initialSource = sourceInfo(documentState);
     const state = {
@@ -1544,7 +1587,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         fps: number(widgetValue(node, "fps", documentState.fps || 24), 24), source: initialSource,
         metadata: {}, metadataAnchors: [], frameItems: new Map(), previews: new Map(), imageCache: new Map(), imagePending: new Map(),
         loadGeneration: 0, sourceGeneration: 0, missingFrame: false,
-        anchors: explicitAnchors(documentState), localEdits: false, dirty: false, previewStale: false, resetBlank: false, previewSignature: "", editRevision: 0, pendingPreview: null, widgetSnapshot: widgetSnapshot(node), modeSnapshot: String(widgetValue(node, "tracking_mode", "")),
+        anchors: explicitAnchors(documentState), localEdits: false, dirty: false, previewStale: false, resetBlank: false, previewSignature: "", editRevision: 0, pendingPreview: null, widgetSnapshot: widgetSnapshot(node), modeSnapshot: String(widgetValue(node, "tracking_mode", "")), serverMaskSettings: null,
         active: null, penPath: [], penHover: null, penSnapClose: false, ghost: null, grabcut: false, refineMethod: node.properties?.__thsRefineMethod === "sam3" ? "sam3" : "grabcut", dpr: 1, zoom: 1, panX: 0, panY: 0, panning: null,
         playbackSpeed: 1, playing: false, timer: null, history: [], historyIndex: -1, dialogOpen: false, dialogReturnFocus: null,
         markerKey: "", previewUse: 0, lastPointer: null, destroyed: false, pendingSource: null,
@@ -1555,7 +1598,48 @@ export function createUniversalMaskEditor(node, options = {}) {
     };
     if (node.properties?.__thsPreviousMask && typeof node.properties.__thsPreviousMask === "object") state.previousMaskBackup = clone(node.properties.__thsPreviousMask);
 
-    inspectorBody.append(editPanel);
+    let cropControls = null;
+    cropControls = createCropControls({
+        state,
+        documentState,
+        section,
+        labelControl,
+        iconButton,
+        canvasWrap,
+        geometry: () => geometry(),
+        getExtent: () => {
+            const { grow, feather } = snapshotMaskSettings();
+            return effectiveCropExtent(state.metadata, grow, feather, state.source);
+        },
+        assignTooltipMetadata,
+        setTooltip,
+        onCropChange(nextCrop) {
+            if (state.mismatchBlocked) return;
+            const preservedSam3 = { ...state.sam3 };
+            const wasStale = state.previewStale;
+            const wasDirty = state.dirty;
+            const wasLocalEdits = state.localEdits;
+            documentState.crop = clone(nextCrop);
+            const multNote = nextCrop.multiple > 1 ? `, ×${nextCrop.multiple}` : "";
+            pushHistory(`Автокроп: ${nextCrop.mode === "auto" ? `авто (${nextCrop.margin} px${multNote})` : nextCrop.mode === "manual" ? `рамка вручную${nextCrop.multiple > 1 ? ` (×${nextCrop.multiple})` : ""}` : "весь кадр"}`);
+            commit({ markDirty: false });
+            state.previewStale = wasStale;
+            state.dirty = wasDirty;
+            state.localEdits = wasLocalEdits;
+            state.sam3 = preservedSam3;
+            updateDirtyIndicator();
+            updateReadouts();
+            updateActionAvailability();
+            draw();
+            setStatus(
+                nextCrop.mode === "full"
+                    ? "Автокроп выключен: выходы используют полный кадр."
+                    : "Окно автокропа обновлено — выходы cropped_images и cropped_mask готовы.",
+                "ready",
+            );
+        },
+    });
+    inspectorBody.append(cropControls.panel, editPanel);
 
     function diagnosticState() {
         const source = (item) => item ? { frames: item.frames, width: item.width, height: item.height, fingerprint: item.fingerprint } : null;
@@ -1759,11 +1843,13 @@ export function createUniversalMaskEditor(node, options = {}) {
     function updateMaskSettingTooltips() {
         const sam3 = sam3Mode();
         const hint = sam3
-            ? "Для SAM3 значение применяется к сохранённому кэшу трекинга; для нового трека нажмите «Отследить видео»."
-            : "Для предпросмотра нажмите «Рассчитать маску».";
+            ? "Меняется в предпросмотре сразу. Для нового трека SAM3 нажмите «Отследить видео»."
+            : "Меняется в предпросмотре сразу и применяется к итоговой маске.";
         for (const [name, input] of Object.entries(maskSettingsInputs)) {
             const description = name === "grow" ? "Расширение маски" : "Растушёвка края маски";
-            setTooltip(input, `${description}, 0–256 пикселей. ${hint}`);
+            const tip = `${description}, 0–256 пикселей. ${hint}`;
+            setTooltip(input, tip);
+            if (maskSettingsRanges[name]) setTooltip(maskSettingsRanges[name], tip);
         }
     }
 
@@ -1853,6 +1939,7 @@ export function createUniversalMaskEditor(node, options = {}) {
             : "Подготовка не запускает полный граф";
         setTooltip(queue, queueTip);
         setTooltip(queueWrap, queueTip);
+        cropControls?.refresh(Boolean(state.pendingPreview || state.pendingQueue));
         syncAlertBanner();
         showRequestProgress();
     }
@@ -1866,6 +1953,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         state.imagePending.clear();
         state.missingFrame = false;
         state.previewUse = 0;
+        maskPostprocessor.invalidate();
     }
 
     function capturePreviousMask(source = state.source || sourceInfo(documentState)) {
@@ -1950,16 +2038,27 @@ export function createUniversalMaskEditor(node, options = {}) {
         return Object.fromEntries(Object.entries(maskSettingsDefaults).map(([name, fallback]) => [name, clamp(Math.round(number(widgetValue(node, name, fallback), fallback)), 0, 256)]));
     }
 
-    function syncMaskSettingsInputs() {
+    function syncMaskSettingsInputs({ skipInput = null } = {}) {
         const values = snapshotMaskSettings();
         for (const [name, input] of Object.entries(maskSettingsInputs)) {
-            input.value = String(values[name]);
-            input.disabled = !findWidget(node, name) || Boolean(node.inputs?.some((socket) => socket.name === name && socket.link != null));
+            const str = String(values[name]);
+            const disabled = !findWidget(node, name) || Boolean(node.inputs?.some((socket) => socket.name === name && socket.link != null));
+            if (input !== skipInput) input.value = str;
+            input.disabled = disabled;
+            const range = maskSettingsRanges[name];
+            if (range) {
+                range.value = str;
+                range.disabled = disabled;
+                syncSliderMetrics(range, `${str} px`);
+            }
         }
     }
 
     function documentSignature() {
-        try { return JSON.stringify(documentState); } catch (_) { return ""; }
+        try {
+            const { crop: _ignoredCrop, ...maskOnly } = documentState;
+            return JSON.stringify(maskOnly);
+        } catch (_) { return ""; }
     }
 
     function pushHistory(label = "Изменение") {
@@ -1979,53 +2078,81 @@ export function createUniversalMaskEditor(node, options = {}) {
         if (state.mismatchBlocked) { setStatus("Источник не совпадает с сохранённой маской. Сначала примите новый клип или восстановите прежний источник.", "warn"); return false; }
         const entry = state.history[index];
         if (!entry) return false;
+        const documentChanged = JSON.stringify(entry.document) !== JSON.stringify(snapshotDocument());
+        const wasStale = state.previewStale;
+        const wasClean = !wasStale && (!state.previewSignature || state.previewSignature === documentSignature());
+        const wasSam3 = { ...state.sam3 };
         const approvedSeed = sam3FrameReady() ? {
             frame: state.sam3.frame, token: state.sam3.seedToken,
             signature: sam3SeedSignature(state.sam3.frame),
         } : null;
         const historyAction = index < state.historyIndex ? "Изменение отменено" : "Изменение повторено";
-        replaceDocument(documentState, entry.document);
+        if (documentChanged) replaceDocument(documentState, entry.document);
         for (const [name, value] of Object.entries(entry.settings || {})) {
             if (Object.prototype.hasOwnProperty.call(maskSettingsDefaults, name)) setWidget(node, name, value);
         }
         syncMaskSettingsInputs();
-        if (["sam3", "optical_flow", "static", "keyframes"].includes(documentState.tracking_mode)) {
-            setWidget(node, "tracking_mode", documentState.tracking_mode);
-            modeSelect.value = documentState.tracking_mode;
-        }
-        if (documentState.tracking_mode === "sam3") {
-            state.sam3 = { ...state.sam3, ...(clone(documentState.sam3) || {}) };
-            state.sam3.direction = sam3Direction(state.sam3.direction);
-            directionSelect.value = state.sam3.direction;
-        }
-        state.historyIndex = index;
-        state.resetBlank = Object.keys(documentState.frames || {}).length === 0;
-        state.localEdits = true; state.dirty = true; state.previewStale = true; state.editRevision += 1;
-        state.source = sourceInfo(documentState) || state.source;
-        state.frameCount = state.source?.frames || state.frameCount;
-        state.anchors = explicitAnchors(documentState);
-        if (documentState.tracking_mode === "sam3") {
-            state.sam3.frame = Number.isFinite(Number(documentState.sam3?.frame)) ? Math.max(0, Math.round(Number(documentState.sam3.frame))) : state.sam3.frame;
-            state.sam3.seedToken = String(documentState.sam3?.seed_token || state.sam3.seedToken || "");
-            state.sam3.direction = sam3Direction(documentState.sam3?.direction || state.sam3.direction);
-            // History may predate the server's canonical token. Reuse a live
-            // verified seed only when its source, frame and prompt boxes match.
-            // Brush edits/settings require a new track, not a new object seed.
-            const sameSeed = Boolean(approvedSeed && approvedSeed.frame === state.sam3.frame
-                && approvedSeed.signature === sam3SeedSignature(state.sam3.frame));
-            if (sameSeed) {
-                state.sam3.seedToken = approvedSeed.token;
-                documentState.sam3.seed_token = approvedSeed.token;
+        if (documentChanged) {
+            if (["sam3", "optical_flow", "static", "keyframes"].includes(documentState.tracking_mode)) {
+                setWidget(node, "tracking_mode", documentState.tracking_mode);
+                modeSelect.value = documentState.tracking_mode;
             }
-            state.sam3.frameReady = sameSeed; state.sam3.trackReady = false;
-            state.sam3.frameSignature = sameSeed ? sam3ReadinessSignature({ range: false }) : "";
-            state.sam3.trackSignature = "";
-            state.sam3.error = "";
-            state.metadata = { ...state.metadata, sam3: { ...(state.metadata?.sam3 || {}), frame_ready: sameSeed, track_ready: false } };
-            directionSelect.value = state.sam3.direction;
+            if (documentState.tracking_mode === "sam3") {
+                state.sam3 = { ...state.sam3, ...(clone(documentState.sam3) || {}) };
+                state.sam3.direction = sam3Direction(state.sam3.direction);
+                directionSelect.value = state.sam3.direction;
+            }
+            state.historyIndex = index;
+            state.resetBlank = Object.keys(documentState.frames || {}).length === 0;
+            state.localEdits = true; state.dirty = true; state.previewStale = true; state.editRevision += 1;
+            state.source = sourceInfo(documentState) || state.source;
+            state.frameCount = state.source?.frames || state.frameCount;
+            state.anchors = explicitAnchors(documentState);
+            if (documentState.tracking_mode === "sam3") {
+                state.sam3.frame = Number.isFinite(Number(documentState.sam3?.frame)) ? Math.max(0, Math.round(Number(documentState.sam3.frame))) : state.sam3.frame;
+                state.sam3.seedToken = String(documentState.sam3?.seed_token || state.sam3.seedToken || "");
+                state.sam3.direction = sam3Direction(documentState.sam3?.direction || state.sam3.direction);
+                // History may predate the server's canonical token. Reuse a live
+                // verified seed only when its source, frame and prompt boxes match.
+                // Brush edits/settings require a new track, not a new object seed.
+                const sameSeed = Boolean(approvedSeed && approvedSeed.frame === state.sam3.frame
+                    && approvedSeed.signature === sam3SeedSignature(state.sam3.frame));
+                if (sameSeed) {
+                    state.sam3.seedToken = approvedSeed.token;
+                    documentState.sam3.seed_token = approvedSeed.token;
+                }
+                state.sam3.frameReady = sameSeed; state.sam3.trackReady = false;
+                state.sam3.frameSignature = sameSeed ? sam3ReadinessSignature({ range: false }) : "";
+                state.sam3.trackSignature = "";
+                state.sam3.error = "";
+                state.metadata = { ...state.metadata, sam3: { ...(state.metadata?.sam3 || {}), frame_ready: sameSeed, track_ready: false } };
+                directionSelect.value = state.sam3.direction;
+            }
+        } else {
+            state.historyIndex = index;
+            state.localEdits = true; state.dirty = true; state.previewStale = wasStale; state.editRevision += 1;
+            state.sam3 = wasSam3;
         }
-        updateReadouts(); draw(); commit({ markDirty: false });
-        setStatus(`${historyAction}. ${sam3FrameReady() ? "Нажмите «Отследить видео», чтобы применить правки." : "Обновите маску для проверки результата."}`, "dirty");
+        updateReadouts(); updateActionAvailability(); cropControls?.refresh?.(); draw(); commit({ markDirty: false });
+        if (!documentChanged) {
+            if (wasClean) {
+                state.previewStale = false;
+                state.previewSignature = documentSignature();
+            } else {
+                state.previewStale = wasStale;
+            }
+            state.sam3 = wasSam3;
+            updateDirtyIndicator();
+            updateActionAvailability();
+            cropControls?.refresh?.();
+            draw();
+        }
+        setStatus(
+            !documentChanged
+                ? `${historyAction} — предпросмотр обновлён.`
+                : `${historyAction}. ${sam3FrameReady() ? "Нажмите «Отследить видео», чтобы применить правки." : "Обновите маску для проверки результата."}`,
+            !documentChanged && !wasStale ? "ready" : "dirty",
+        );
         return true;
     }
 
@@ -2066,6 +2193,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         documentState.frames = frames; documentState.version = 1; documentState.source = payload.source;
         if (payload.anchors) documentState.anchors = clone(payload.anchors);
         delete documentState.keyframes; delete documentState.keys; documentState.tracking_mode = payload.tracking_mode;
+        if (documentState.crop && typeof documentState.crop === "object") payload.crop = clone(documentState.crop);
         if (payload.sam3) documentState.sam3 = clone(payload.sam3); else delete documentState.sam3;
         setWidget(node, "mask_data", JSON.stringify(payload));
         state.widgetSnapshot = widgetSnapshot(node); state.modeSnapshot = String(widgetValue(node, "tracking_mode", "")); state.anchors = explicitAnchors(documentState);
@@ -2230,27 +2358,6 @@ export function createUniversalMaskEditor(node, options = {}) {
         target.restore?.();
     }
 
-    function tintMaskCanvas(maskOnly, alpha) {
-        if (!maskCtx || typeof maskCtx.getImageData !== "function" || typeof maskCtx.putImageData !== "function") return false;
-        let imageData;
-        try { imageData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height); } catch (_) { return false; }
-        if (!imageData?.data) return false;
-        const pixels = imageData.data;
-        for (let index = 0; index < pixels.length; index += 4) {
-            const luminance = (0.2126 * pixels[index] + 0.7152 * pixels[index + 1] + 0.0722 * pixels[index + 2]) / 255;
-            const sourceAlpha = pixels[index + 3] / 255;
-            if (maskOnly) {
-                const value = Math.round(luminance * sourceAlpha * 255);
-                pixels[index] = value; pixels[index + 1] = value; pixels[index + 2] = value; pixels[index + 3] = 255;
-            } else {
-                pixels[index] = 79; pixels[index + 1] = 227; pixels[index + 2] = 139;
-                pixels[index + 3] = Math.round(luminance * sourceAlpha * 255 * alpha);
-            }
-        }
-        try { maskCtx.putImageData(imageData, 0, 0); } catch (_) { return false; }
-        return true;
-    }
-
     function drawPenOverlay(box) {
         if (!state.penPath.length) return;
         const toX = (nx) => box.offsetX + nx * box.drawnWidth;
@@ -2325,7 +2432,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         const preview = selectedPreview();
         if (!ctx || !preview?.sourceImage?.naturalWidth || state.missingFrame) {
             ctx?.clearRect?.(0, 0, canvas.width, canvas.height);
-            empty.style.display = "grid"; brushCursor.style.display = "none"; return;
+            empty.style.display = "grid"; brushCursor.style.display = "none"; cropControls?.place?.(null); return;
         }
         empty.style.display = "none";
         const { width: viewportWidth, height: viewportHeight } = canvasMetrics(); state.dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -2334,29 +2441,131 @@ export function createUniversalMaskEditor(node, options = {}) {
         const box = geometry(); if (!box) return;
         ctx.fillStyle = window.getComputedStyle?.(canvasWrap)?.backgroundColor || "#202020"; ctx.fillRect(0, 0, viewportWidth, viewportHeight);
         if (state.view !== "mask") ctx.drawImage(preview.sourceImage, box.offsetX, box.offsetY, box.drawnWidth, box.drawnHeight);
-        maskCanvas.width = Math.max(1, Math.round(viewportWidth * state.dpr)); maskCanvas.height = Math.max(1, Math.round(viewportHeight * state.dpr));
+        const imgW = preview.sourceImage.naturalWidth, imgH = preview.sourceImage.naturalHeight;
+        const workScale = Math.min(1, 640 / Math.max(1, imgW, imgH));
+        const workW = Math.max(1, Math.round(imgW * workScale)), workH = Math.max(1, Math.round(imgH * workScale));
+        const srcW = number(state.source?.width, imgW), srcH = number(state.source?.height, imgH);
+        const pxScale = Math.min(workW / Math.max(1, srcW), workH / Math.max(1, srcH));
+        const maskBox = { offsetX: 0, offsetY: 0, drawnWidth: workW, drawnHeight: workH, scale: pxScale };
+        maskCanvas.width = workW; maskCanvas.height = workH;
         if (maskCtx) {
-            maskCtx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0); maskCtx.clearRect(0, 0, viewportWidth, viewportHeight);
+            maskCtx.setTransform(1, 0, 0, 1, 0, 0); maskCtx.clearRect(0, 0, workW, workH);
             const mismatchBlocked = Boolean(state.mismatchBlocked);
             const refinementFailed = Boolean(state.refinementError || state.metadata?.refinement_error);
             const draft = mismatchBlocked || refinementFailed ? true : frameNeedsDraft(state.frame);
             const bucket = frameBucket(state.frame);
             const inherits = bucket ? bucket.inherit === true : shouldInherit(state.frame);
-            const baseline = mismatchBlocked || refinementFailed || state.resetBlank ? null : draft
-                ? (inherits ? preview.editBaseImage : null)
-                : preview.maskImage;
-            if (baseline?.naturalWidth) maskCtx.drawImage(baseline, box.offsetX, box.offsetY, box.drawnWidth, box.drawnHeight);
-            if (draft && !mismatchBlocked) for (const event of eventsAt(state.frame)) drawEvent(maskCtx, event, box, true, { outlineOnly: refinementFailed || state.refinementBusy });
-            if (state.ghost && !mismatchBlocked) drawEvent(maskCtx, state.ghost, box, true, { outlineOnly: state.refinementBusy || state.ghost.refine });
+            const currentSettings = snapshotMaskSettings();
+            const serverSettings = state.serverMaskSettings;
+            const settingsDifferFromServer = Boolean(
+                serverSettings && (
+                    currentSettings.grow !== serverSettings.grow ||
+                    currentSettings.feather !== serverSettings.feather
+                )
+            );
+            let baseline = null;
+            let applyPostprocess = true;
+            let replayLocal = false;
+            let effGrow = currentSettings.grow;
+            let effFeather = currentSettings.feather;
+            let baselineKind = "none";
+
+            if (mismatchBlocked || refinementFailed || state.resetBlank) {
+                baseline = null;
+                applyPostprocess = true;
+                replayLocal = draft && !mismatchBlocked;
+                baselineKind = "none";
+            } else if (draft) {
+                baseline = inherits ? preview.editBaseImage : null;
+                applyPostprocess = true;
+                replayLocal = true;
+                baselineKind = baseline ? "editBase" : "none";
+            } else if (!settingsDifferFromServer) {
+                baseline = preview.maskImage;
+                applyPostprocess = false;
+                replayLocal = false;
+                baselineKind = baseline ? "mask" : "none";
+            } else if (preview.rawMaskImage?.naturalWidth) {
+                baseline = preview.rawMaskImage;
+                applyPostprocess = true;
+                replayLocal = false;
+                baselineKind = "rawMask";
+            } else if (sam3Mode() && preview.editBaseImage?.naturalWidth) {
+                baseline = preview.editBaseImage;
+                applyPostprocess = true;
+                replayLocal = true;
+                baselineKind = "editBase";
+            } else if (eventsAt(state.frame).length === 0 && preview.editBaseImage?.naturalWidth) {
+                baseline = preview.editBaseImage;
+                applyPostprocess = true;
+                replayLocal = false;
+                baselineKind = "editBase";
+            } else if (preview.maskImage?.naturalWidth) {
+                baseline = preview.maskImage;
+                applyPostprocess = true;
+                replayLocal = false;
+                effGrow = Math.max(0, currentSettings.grow - (serverSettings?.grow ?? 0));
+                effFeather = Math.max(0, currentSettings.feather - (serverSettings?.feather ?? 0));
+                baselineKind = "maskFallback";
+            }
+
+            const forcedOutline = refinementFailed || state.refinementBusy;
+            const isOutlineRect = (event) => Boolean(event && event.type === "rect" && event.mode !== "erase" && (forcedOutline || event.refine));
+            const deferredOutlines = [];
+            if (baseline?.naturalWidth) maskCtx.drawImage(baseline, 0, 0, workW, workH);
+            if (replayLocal && !mismatchBlocked) {
+                for (const event of eventsAt(state.frame)) {
+                    if (isOutlineRect(event)) {
+                        if (draft) deferredOutlines.push(event);
+                    } else {
+                        drawEvent(maskCtx, event, maskBox, true);
+                    }
+                }
+            }
+            if (state.ghost && !mismatchBlocked) {
+                if (state.ghost.type === "rect" && state.ghost.mode !== "erase" && (state.refinementBusy || state.ghost.refine)) {
+                    deferredOutlines.push(state.ghost);
+                } else {
+                    drawEvent(maskCtx, state.ghost, maskBox, true);
+                }
+            }
             if (state.penPath.length >= 2) {
                 const penPreviewPoints = flattenPenPath(state.penPath, { closed: true });
-                if (penPreviewPoints.length >= 3) drawEvent(maskCtx, { type: "polygon", mode: "add", points: penPreviewPoints }, box, true);
+                if (penPreviewPoints.length >= 3) drawEvent(maskCtx, { type: "polygon", mode: "add", points: penPreviewPoints }, maskBox, true);
             }
             if (state.view !== "source") {
                 const maskOnly = state.view === "mask";
                 const alpha = number(opacity.value, .38);
-                tintMaskCanvas(maskOnly, alpha);
-                ctx.save(); ctx.globalAlpha = 1; ctx.drawImage(maskCanvas, 0, 0, viewportWidth, viewportHeight); ctx.restore();
+                let imageData = null;
+                if (typeof maskCtx.getImageData === "function" && typeof maskCtx.putImageData === "function") {
+                    try { imageData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height); } catch (_) { imageData = null; }
+                }
+                if (imageData?.data) {
+                    const postData = imageData.width && imageData.height
+                        ? imageData
+                        : { data: imageData.data, width: maskCanvas.width, height: maskCanvas.height };
+                    const baselineTag = baseline === preview.rawMaskImage ? "raw"
+                        : baseline === preview.editBaseImage ? "base"
+                        : baseline === preview.maskImage ? "mask"
+                        : "none";
+                    const isInteractiveGesture = Boolean(state.active || state.ghost || state.penPath.length);
+                    const rawKey = isInteractiveGesture
+                        ? ""
+                        : `${state.sourceGeneration}:${state.loadGeneration}:${state.frame}:${state.editRevision}:${Number(preview.lastUsed || 0)}:${draft ? 1 : 0}:${replayLocal ? 1 : 0}:${state.resetBlank ? 1 : 0}:${baselineKind}:${baselineTag}:${workW}x${workH}`;
+                    maskPostprocessor.processImageData(postData, {
+                        rawKey,
+                        growPx: effGrow * pxScale,
+                        featherPx: effFeather * pxScale,
+                        maskOnly,
+                        alpha,
+                        applyPostprocess,
+                    });
+                    try { maskCtx.putImageData(imageData, 0, 0); } catch (_) { /* ignore */ }
+                }
+                ctx.save(); ctx.globalAlpha = 1; ctx.drawImage(maskCanvas, box.offsetX, box.offsetY, box.drawnWidth, box.drawnHeight); ctx.restore();
+            }
+            for (const outlineEvent of deferredOutlines) {
+                drawEvent(ctx, outlineEvent, box, state.view === "mask", { outlineOnly: true });
             }
         }
         const sam3Badge = sam3Mode() ? ` · SAM3 ${sam3TrackReady() ? "трек" : sam3FrameReady() ? "кадр" : "черновик"}` : "";
@@ -2391,6 +2600,7 @@ export function createUniversalMaskEditor(node, options = {}) {
             ctx.restore();
         }
         drawPenOverlay(box);
+        cropControls?.place?.(box);
         canvasBadge.textContent = `${state.view === "overlay" ? "Наложение" : state.view === "mask" ? "Маска" : "Источник"}${sam3Badge} · Масштаб ${Math.round(state.zoom * 100)}%`;
         zoomReadout.textContent = `${Math.round(state.zoom * 100)}%`;
         updateBrushCursor(state.lastPointer);
@@ -2481,7 +2691,7 @@ export function createUniversalMaskEditor(node, options = {}) {
     function cacheImage(key, image) {
         if (!image) return;
         state.imageCache.delete(key); state.imageCache.set(key, image);
-        while (state.imageCache.size > MAX_PREVIEWS * 2) state.imageCache.delete(state.imageCache.keys().next().value);
+        while (state.imageCache.size > MAX_PREVIEWS * 4) state.imageCache.delete(state.imageCache.keys().next().value);
     }
 
     function loadImage(value, key = "") {
@@ -2497,7 +2707,16 @@ export function createUniversalMaskEditor(node, options = {}) {
 
     function descriptorFor(frame) {
         const item = state.frameItems.get(frame) || state.previews.get(frame); if (!item) return null;
-        return { source: item.source || item.sourceDescriptor || item, mask: item.mask || item.maskDescriptor || item.mask_url, edit_base: item.edit_base || item.editBase || item.edit_base_descriptor };
+        return {
+            source: item.source || item.sourceDescriptor || item,
+            mask: item.mask || item.maskDescriptor || item.mask_url,
+            raw_mask: item.raw_mask || item.rawMask || item.raw_mask_url,
+            edit_base: item.edit_base || item.editBase || item.edit_base_descriptor,
+            ...(item.sourceImage ? { sourceImage: item.sourceImage } : {}),
+            ...(item.maskImage ? { maskImage: item.maskImage } : {}),
+            ...(item.rawMaskImage ? { rawMaskImage: item.rawMaskImage } : {}),
+            ...(item.editBaseImage ? { editBaseImage: item.editBaseImage } : {}),
+        };
     }
 
     function cachePreview(frame, item) {
@@ -2523,6 +2742,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         }
         const sourceImage = descriptor.sourceImage || await loadImage(descriptor.source, `source:${frame}`);
         const maskImage = descriptor.maskImage || await loadImage(descriptor.mask, `mask:${frame}`);
+        const rawMaskImage = descriptor.rawMaskImage || await loadImage(descriptor.raw_mask, `raw_mask:${frame}`);
         const editBaseImage = descriptor.editBaseImage || await loadImage(descriptor.edit_base, `edit_base:${frame}`);
         if (generation !== state.loadGeneration || expectedSource !== (state.source?.fingerprint || state.sourceGeneration)) {
             if (!prefetch) diagnostics.record("frame.discarded", { frame, generation });
@@ -2532,7 +2752,7 @@ export function createUniversalMaskEditor(node, options = {}) {
             if (!prefetch && frame === state.frame) { state.missingFrame = true; empty.textContent = `Не удалось загрузить кадр ${frame + 1}. Проверьте preview /view.`; setStatus(`Ошибка загрузки кадра ${frame + 1}.`, "error"); draw(); }
             return null;
         }
-        cachePreview(frame, { sourceImage, maskImage, editBaseImage, edit_base: descriptor.edit_base });
+        cachePreview(frame, { sourceImage, maskImage, rawMaskImage, editBaseImage, edit_base: descriptor.edit_base });
         if (!prefetch && frame === state.frame) state.missingFrame = false;
         if (!prefetch && frame === state.frame) {
             const needsUpdate = state.previewStale || state.previewSignature !== documentSignature();
@@ -2558,26 +2778,30 @@ export function createUniversalMaskEditor(node, options = {}) {
         const descriptors = Array.isArray(output.universal_mask_frames) ? output.universal_mask_frames : [];
         for (const item of descriptors) {
             const frame = Math.max(0, Math.round(number(item?.frame, 0)));
+            const rawMask = allowMask ? (item.raw_mask || item.rawMask || item.raw_mask_url) : null;
             const descriptor = {
                 ...item,
                 source: item.source || item,
                 mask: allowMask ? (item.mask || item.mask_url) : null,
                 edit_base: allowMask ? item.edit_base : null,
+                ...(rawMask ? { raw_mask: rawMask } : {}),
             };
-            if (!allowMask) for (const key of ["mask_url", "maskDescriptor", "edit_base_descriptor", "editBase", "edit_base"]) delete descriptor[key];
+            if (!allowMask) for (const key of ["mask_url", "maskDescriptor", "raw_mask", "rawMask", "raw_mask_url", "edit_base_descriptor", "editBase", "edit_base"]) delete descriptor[key];
             state.frameItems.set(frame, descriptor);
         }
         const previews = Array.isArray(output.universal_mask_preview) ? output.universal_mask_preview : [];
         for (const item of previews.slice(0, MAX_PREVIEWS)) {
             const frame = Math.max(0, Math.round(number(item?.frame, 0)));
+            const rawMask = allowMask ? (item.raw_mask || item.rawMask || item.raw_mask_url) : null;
             const descriptor = {
                 ...(state.frameItems.get(frame) || {}),
                 ...item,
                 source: item.data_url || item.source || item,
                 mask: allowMask ? (item.mask_url || item.mask) : null,
                 edit_base: allowMask ? item.edit_base : null,
+                ...(rawMask ? { raw_mask: rawMask } : {}),
             };
-            if (!allowMask) for (const key of ["mask_url", "maskDescriptor", "edit_base_descriptor", "editBase", "edit_base"]) delete descriptor[key];
+            if (!allowMask) for (const key of ["mask_url", "maskDescriptor", "raw_mask", "rawMask", "raw_mask_url", "edit_base_descriptor", "editBase", "edit_base"]) delete descriptor[key];
             state.frameItems.set(frame, descriptor);
         }
     }
@@ -2587,11 +2811,13 @@ export function createUniversalMaskEditor(node, options = {}) {
         // masks from the previous selection/track, including on other frames.
         state.loadGeneration += 1;
         for (const [frame, item] of state.frameItems) {
-            state.frameItems.set(frame, {
+            const nextItem = {
                 source: item.source || item,
                 mask: frame === patch.frame ? patch.mask : null,
                 edit_base: frame === patch.frame ? patch.edit_base : null,
-            });
+            };
+            if (frame === patch.frame && patch.raw_mask) nextItem.raw_mask = patch.raw_mask;
+            state.frameItems.set(frame, nextItem);
         }
         for (const [frame, preview] of state.previews) {
             state.previews.set(frame, { sourceImage: preview.sourceImage, lastUsed: preview.lastUsed });
@@ -2746,6 +2972,13 @@ export function createUniversalMaskEditor(node, options = {}) {
         state.metadata = rawMeta && typeof rawMeta === "object"
             ? { ...(framePatch ? state.metadata : {}), ...clone(rawMeta) }
             : {};
+        state.serverMaskSettings = rawMeta?.mask_postprocess
+            ? {
+                grow: clamp(Math.round(number(rawMeta.mask_postprocess.grow, 0)), 0, 256),
+                feather: clamp(Math.round(number(rawMeta.mask_postprocess.feather, 0)), 0, 256),
+            }
+            : snapshotMaskSettings();
+        maskPostprocessor.invalidate();
         state.metadataAnchors = Array.isArray(rawMeta?.anchors) ? explicitAnchors({ anchors: rawMeta.anchors }) : [];
         state.fps = number(rawMeta?.fps, number(widgetValue(node, "fps", 24), 24));
         state.refinementError = typeof rawMeta?.refinement_error === "string" ? refinementMessage(rawMeta.refinement_error) : "";
@@ -3198,25 +3431,65 @@ export function createUniversalMaskEditor(node, options = {}) {
         invalidateSam3({ track: true, reason: "Направление изменилось — повторите трекинг видео." }); pushHistory("Направление трекинга"); commit({ markDirty: true }); updateReadouts(); updateActionAvailability();
     });
     for (const [name, input] of Object.entries(maskSettingsInputs)) {
-        const applySetting = () => {
-            if (state.mismatchBlocked) { syncMaskSettingsInputs(); setStatus("Источник не совпадает с сохранённой маской. Настройки заблокированы до восстановления.", "warn"); return; }
-            const current = snapshotMaskSettings()[name];
-            const value = String(input.value).trim() === "" ? current : clamp(Math.round(number(input.value, current)), 0, 256);
-            input.value = String(value);
-            if (input.disabled || value === current || !setWidget(node, name, value)) return;
-            pushHistory(`${name === "grow" ? "Grow" : "Feather"}: ${value} px`);
-            commit({ markDirty: true }); updateReadouts();
-            setStatus(sam3Mode() ? "Настройки маски изменены. Значение применяется к кэшу трекинга; для нового трека нажмите «Отследить видео»." : "Настройки маски изменены. Нажмите «Рассчитать маску», чтобы увидеть результат.", "dirty");
+        const range = maskSettingsRanges[name];
+        const label = name === "grow" ? "Grow" : "Feather";
+        const previewSetting = (rawValue, { fromRange = false } = {}) => {
+            if (state.mismatchBlocked || input.disabled) return;
+            if (!fromRange && String(rawValue).trim() === "") return;
+            const parsed = number(rawValue, NaN);
+            if (!Number.isFinite(parsed)) return;
+            const value = clamp(Math.round(parsed), 0, 256);
+            if (!state.serverMaskSettings) state.serverMaskSettings = snapshotMaskSettings();
+            if (value !== snapshotMaskSettings()[name]) setWidget(node, name, value);
+            syncMaskSettingsInputs({ skipInput: fromRange ? null : input });
+            cropControls?.refresh?.();
+            draw();
         };
-        input.addEventListener("change", applySetting);
-        input.addEventListener("blur", applySetting);
+        const commitSetting = (rawValue) => {
+            if (state.mismatchBlocked) { syncMaskSettingsInputs(); setStatus("Источник не совпадает с сохранённой маской. Настройки заблокированы до восстановления.", "warn"); return; }
+            if (input.disabled) return;
+            const current = snapshotMaskSettings()[name];
+            const value = String(rawValue).trim() === "" ? current : clamp(Math.round(number(rawValue, current)), 0, 256);
+            if (!state.serverMaskSettings) state.serverMaskSettings = snapshotMaskSettings();
+            if (value !== current) setWidget(node, name, value);
+            syncMaskSettingsInputs();
+            const committedValue = state.history[state.historyIndex]?.settings?.[name];
+            if (value === committedValue) {
+                cropControls?.refresh?.();
+                draw();
+                return;
+            }
+            const wasStale = state.previewStale;
+            const wasClean = !wasStale && (!state.previewSignature || state.previewSignature === documentSignature());
+            const wasSam3 = { ...state.sam3 };
+            pushHistory(`${label}: ${value} px`);
+            commit({ markDirty: true });
+            if (wasClean) {
+                state.previewStale = false;
+                state.previewSignature = documentSignature();
+            } else {
+                state.previewStale = wasStale;
+            }
+            state.sam3 = wasSam3;
+            updateDirtyIndicator();
+            updateActionAvailability();
+            cropControls?.refresh?.();
+            updateReadouts();
+            draw();
+            setStatus(`${label}: ${value} px — предпросмотр обновлён.`, wasStale ? "dirty" : "ready");
+        };
+        input.addEventListener("input", () => previewSetting(input.value, { fromRange: false }));
+        input.addEventListener("change", () => commitSetting(input.value));
+        input.addEventListener("blur", () => commitSetting(input.value));
         input.addEventListener("keydown", (event) => {
             if (event.isComposing || event.keyCode === 229) return;
             if (event.key !== "Enter") return;
-            applySetting();
+            commitSetting(input.value);
             event.preventDefault?.();
             event.stopPropagation?.();
         });
+        range?.addEventListener("input", () => previewSetting(range.value, { fromRange: true }));
+        range?.addEventListener("change", () => commitSetting(range.value));
     }
     slider.addEventListener("input", () => setFrame(slider.value));
     direct.addEventListener("change", () => setFrame(number(direct.value, 1) - 1));
@@ -3652,7 +3925,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         const maskChanged = snapshot !== state.widgetSnapshot;
         const modeChanged = modeSnapshot !== state.modeSnapshot;
         diagnostics.record("widget.sync", { force, maskChanged, settingsChanged: settingsSnapshot !== state.maskSettingsSnapshot, modeChanged });
-        replaceDocument(documentState, readDocument(node)); state.source = sourceInfo(documentState); state.frameCount = state.source?.frames || state.frameCount || 1; state.anchors = explicitAnchors(documentState); state.metadataAnchors = []; state.frame = clamp(state.frame, 0, Math.max(0, state.frameCount - 1)); modeSelect.value = safeMode(node, documentState); ensureSam3Document(); state.sam3 = { ...state.sam3, frameReady: false, trackReady: false, frame: documentState.sam3?.frame ?? state.sam3.frame, seedToken: String(documentState.sam3?.seed_token || state.sam3.seedToken || ""), direction: sam3Direction(documentState.sam3?.direction || directionSelect.value), computedFrames: [], error: "", sourceKey: currentSourceKey(), frameSignature: "", trackSignature: "", pendingAction: documentState.sam3?.action || "" }; directionSelect.value = state.sam3.direction; syncConfiguredToolState({ resetLegacy: force || modeChanged || maskChanged }); state.widgetSnapshot = snapshot; state.modeSnapshot = modeSnapshot; state.maskSettingsSnapshot = settingsSnapshot; state.previewSignature = ""; state.previewStale = true; state.resetBlank = false; state.loadGeneration += 1; state.frameItems.clear(); state.previews.clear(); state.imageCache.clear(); state.imagePending.clear(); state.history = [{ document: snapshotDocument(), settings: snapshotMaskSettings(), label: "Исходное состояние" }]; state.historyIndex = 0; updateRefineControls(); updateReadouts(); updateActionAvailability(); draw(); return true;
+        replaceDocument(documentState, readDocument(node)); state.source = sourceInfo(documentState); state.frameCount = state.source?.frames || state.frameCount || 1; state.anchors = explicitAnchors(documentState); state.metadataAnchors = []; state.frame = clamp(state.frame, 0, Math.max(0, state.frameCount - 1)); modeSelect.value = safeMode(node, documentState); ensureSam3Document(); state.sam3 = { ...state.sam3, frameReady: false, trackReady: false, frame: documentState.sam3?.frame ?? state.sam3.frame, seedToken: String(documentState.sam3?.seed_token || state.sam3.seedToken || ""), direction: sam3Direction(documentState.sam3?.direction || directionSelect.value), computedFrames: [], error: "", sourceKey: currentSourceKey(), frameSignature: "", trackSignature: "", pendingAction: documentState.sam3?.action || "" }; directionSelect.value = state.sam3.direction; syncConfiguredToolState({ resetLegacy: force || modeChanged || maskChanged }); state.widgetSnapshot = snapshot; state.modeSnapshot = modeSnapshot; state.maskSettingsSnapshot = settingsSnapshot; state.serverMaskSettings = null; state.previewSignature = ""; state.previewStale = true; state.resetBlank = false; state.loadGeneration += 1; state.frameItems.clear(); state.previews.clear(); state.imageCache.clear(); state.imagePending.clear(); maskPostprocessor.invalidate(); state.history = [{ document: snapshotDocument(), settings: snapshotMaskSettings(), label: "Исходное состояние" }]; state.historyIndex = 0; updateRefineControls(); updateReadouts(); updateActionAvailability(); draw(); return true;
     }
 
     // The frame also resizes when toolbars wrap or details open, without any

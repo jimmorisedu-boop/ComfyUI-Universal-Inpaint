@@ -387,6 +387,26 @@ def test_static_mode_keeps_legacy_zero_based_event_order_with_inherit_flag():
     assert np.array_equal(mask[1], expected)
 
 
+def test_build_mask_sequence_can_return_pre_postprocess_raw_mask():
+    images = _clip(frames=2, height=32, width=32)
+    document = {
+        "frames": {
+            "0": {"events": [{"type": "rect", "mode": "add", "x": 0.25, "y": 0.25, "w": 0.5, "h": 0.5}]}
+        }
+    }
+    mask, _parsed, _anchors, raw_mask = build_mask_sequence(
+        images,
+        document,
+        tracking_mode="static",
+        grow=4,
+        feather=3,
+        return_raw_mask=True,
+    )
+    assert raw_mask.shape == mask.shape
+    assert float(raw_mask[0, 6, 16]) == 0.0
+    assert float(mask[0, 6, 16]) > 0.0
+
+
 def test_all_frame_cache_uses_temp_descriptors_and_isolates_sessions(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "folder_paths", types.SimpleNamespace(
         get_temp_directory=lambda: str(tmp_path),
@@ -394,19 +414,21 @@ def test_all_frame_cache_uses_temp_descriptors_and_isolates_sessions(tmp_path, m
     images = _clip(frames=3, height=40, width=60)
     masks = np.zeros((3, 40, 60), dtype=np.float32)
     edit_bases = np.zeros_like(masks)
+    raw_masks = np.zeros_like(masks)
     descriptors, info = cache_preview_assets(
-        images, masks, edit_bases=edit_bases, source_session="source-A"
+        images, masks, edit_bases=edit_bases, raw_masks=raw_masks, source_session="source-A"
     )
     assert info["available"] is True
     assert len(descriptors) == 3
     first = descriptors[0]
     assert first["type"] == "temp"
     assert first["mask"]["type"] == "temp"
+    assert first["raw_mask"]["type"] == "temp"
     assert first["edit_base"]["type"] == "temp"
     assert "data_url" not in first
     assert first["width"] <= 640 and first["height"] <= 640
     for item in descriptors:
-        for descriptor in (item, item["mask"], item["edit_base"]):
+        for descriptor in (item, item["mask"], item["raw_mask"], item["edit_base"]):
             assert (tmp_path / descriptor["subfolder"] / descriptor["filename"]).is_file()
 
     second, second_info = cache_preview_assets(

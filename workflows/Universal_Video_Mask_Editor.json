@@ -144,6 +144,21 @@
           "links": [
             6
           ]
+        },
+        {
+          "name": "cropped_images",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "cropped_mask",
+          "type": "MASK",
+          "links": []
+        },
+        {
+          "name": "crop_info",
+          "type": "STRING",
+          "links": []
         }
       ],
       "properties": {
