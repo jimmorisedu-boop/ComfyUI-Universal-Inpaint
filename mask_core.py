@@ -2170,7 +2170,8 @@ def build_mask_sequence(images: np.ndarray, mask_data: Any = "{}", *, tracking_m
                         return_edit_bases: bool = False,
                         return_sam3_meta: bool = False,
                         return_raw_mask: bool = False,
-                        return_layers_meta: bool = False) -> tuple:
+                        return_layers_meta: bool = False,
+                        return_layer_masks: bool = False) -> tuple:
     """Build a safe ``TxHxW`` mask and return ``(mask, canonical_doc, anchors)``.
 
     Empty or malformed edits never become a full-frame mask: malformed input
@@ -2187,6 +2188,7 @@ def build_mask_sequence(images: np.ndarray, mask_data: Any = "{}", *, tracking_m
         raise MaskDataError("clips longer than 4096 frames are not supported by this editor")
     parsed = parse_mask_data(mask_data, count, width=width, height=height, fingerprint=fingerprint)
     layers_meta: list[dict[str, Any]] = []
+    layer_masks: dict[str, np.ndarray] = {}
 
     if "layers" in parsed:
         active_id = str(parsed.get("active_layer_id") or parsed["layers"][0]["id"])
@@ -2194,6 +2196,7 @@ def build_mask_sequence(images: np.ndarray, mask_data: Any = "{}", *, tracking_m
         edit_bases = np.zeros((count, height, width), dtype=np.float32)
         anchors: set[int] = set()
         sam3_meta: dict[str, Any] = {}
+        emit_layer_masks = bool(return_layer_masks and len(parsed["layers"]) > 1)
 
         for layer in parsed["layers"]:
             if not layer.get("enabled", True):
@@ -2236,6 +2239,8 @@ def build_mask_sequence(images: np.ndarray, mask_data: Any = "{}", *, tracking_m
             _apply_layer_blend(raw_mask, l_raw, blend)
             base_contrib = l_edit_bases if layer["id"] == active_id else l_raw
             _apply_layer_blend(edit_bases, base_contrib, blend)
+            if emit_layer_masks:
+                layer_masks[str(layer["id"])] = l_raw
             anchors |= l_anchors
             if layer["id"] == active_id and l_sam3:
                 sam3_meta = dict(l_sam3)
@@ -2274,6 +2279,8 @@ def build_mask_sequence(images: np.ndarray, mask_data: Any = "{}", *, tracking_m
         outputs.append(raw_mask)
     if return_layers_meta:
         outputs.append(layers_meta)
+    if return_layer_masks:
+        outputs.append(layer_masks)
     return tuple(outputs)
 
 
@@ -2414,6 +2421,7 @@ def cache_preview_assets(
     *,
     edit_bases: np.ndarray | None = None,
     raw_masks: np.ndarray | None = None,
+    layer_masks: Mapping[str, np.ndarray] | None = None,
     max_size: int = MAX_PREVIEW_SIZE,
     source_session: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -2437,6 +2445,13 @@ def cache_preview_assets(
         raw_masks = np.asarray(raw_masks)
         if raw_masks.shape != masks.shape:
             raise MaskDataError("preview raw masks must match mask dimensions")
+    validated_layer_masks: dict[str, np.ndarray] = {}
+    if layer_masks:
+        for layer_id, layer_arr in layer_masks.items():
+            arr = np.asarray(layer_arr)
+            if arr.shape != masks.shape:
+                raise MaskDataError("preview layer masks must match mask dimensions")
+            validated_layer_masks[str(layer_id)] = arr
     try:
         from PIL import Image  # noqa: F401  # imported for an actionable fallback below
         import folder_paths  # type: ignore
@@ -2518,6 +2533,27 @@ def cache_preview_assets(
                         "subfolder": subfolder,
                         "type": "temp",
                     }
+                if validated_layer_masks:
+                    layer_desc: dict[str, dict[str, str]] = {}
+                    for layer_idx, (layer_id, layer_arr) in enumerate(validated_layer_masks.items()):
+                        if not bool(np.any(layer_arr[frame] > 1e-5)):
+                            continue
+                        layer_bytes = _mask_png_payload(layer_arr[frame], size)
+                        written += len(layer_bytes)
+                        if written > MAX_TEMP_CACHE_SESSION_BYTES:
+                            raise RuntimeError(
+                                f"all-frame preview cache exceeds {MAX_TEMP_CACHE_SESSION_BYTES} bytes"
+                            )
+                        layer_name = f"layer_{layer_idx}_{frame:06d}.png"
+                        (cache_dir / layer_name).write_bytes(layer_bytes)
+                        layer_desc[layer_id] = {
+                            "filename": layer_name,
+                            "subfolder": subfolder,
+                            "type": "temp",
+                        }
+                    descriptor["has_layer_masks"] = True
+                    if layer_desc:
+                        descriptor["layer_masks"] = layer_desc
                 descriptors.append(descriptor)
         except Exception:
             shutil.rmtree(cache_dir, ignore_errors=True)
@@ -2630,7 +2666,8 @@ def cache_compare_preview_assets(
 def encode_preview_assets(images: np.ndarray, masks: np.ndarray, *, max_frames: int = MAX_PREVIEW_FRAMES,
                           max_size: int = MAX_PREVIEW_SIZE,
                           edit_bases: np.ndarray | None = None,
-                          raw_masks: np.ndarray | None = None) -> list[dict[str, Any]]:
+                          raw_masks: np.ndarray | None = None,
+                          layer_masks: Mapping[str, np.ndarray] | None = None) -> list[dict[str, Any]]:
     """Encode bounded source/mask previews for the Comfy ``ui`` channel."""
 
     if images.ndim != 4 or masks.ndim != 3 or images.shape[0] != masks.shape[0]:
@@ -2643,6 +2680,13 @@ def encode_preview_assets(images: np.ndarray, masks: np.ndarray, *, max_frames: 
         raw_masks = np.asarray(raw_masks)
         if raw_masks.shape != masks.shape:
             raise MaskDataError("preview raw masks must match mask dimensions")
+    validated_layer_masks: dict[str, np.ndarray] = {}
+    if layer_masks:
+        for layer_id, layer_arr in layer_masks.items():
+            arr = np.asarray(layer_arr)
+            if arr.shape != masks.shape:
+                raise MaskDataError("preview layer masks must match mask dimensions")
+            validated_layer_masks[str(layer_id)] = arr
     try:
         from PIL import Image  # noqa: F401
     except Exception:
@@ -2669,6 +2713,15 @@ def encode_preview_assets(images: np.ndarray, masks: np.ndarray, *, max_frames: 
             entry["edit_base"] = _data_url(_mask_png_payload(edit_bases[frame], size), "image/png")
         if raw_masks is not None:
             entry["raw_mask"] = _data_url(_mask_png_payload(raw_masks[frame], size), "image/png")
+        if validated_layer_masks:
+            layer_urls = {
+                layer_id: _data_url(_mask_png_payload(layer_arr[frame], size), "image/png")
+                for layer_id, layer_arr in validated_layer_masks.items()
+                if bool(np.any(layer_arr[frame] > 1e-5))
+            }
+            entry["has_layer_masks"] = True
+            if layer_urls:
+                entry["layer_masks"] = layer_urls
         result.append(entry)
     return result
 

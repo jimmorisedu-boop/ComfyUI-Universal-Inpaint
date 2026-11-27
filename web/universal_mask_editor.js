@@ -789,7 +789,7 @@ function addStyles(root, instanceKey = "editor") {
       .ths-mask-editor .ths-crop-presets .ths-crop-preset[aria-pressed="true"] { background: color-mix(in oklab, ${COLORS.mask} 18%, ${COLORS.panel2}); border-color: color-mix(in oklab, ${COLORS.mask} 60%, transparent); color: ${COLORS.mask}; }
       .ths-mask-editor .ths-crop-readout { min-height: 26px; display: flex; align-items: center; padding: 4px 8px; border-radius: 5px; background: color-mix(in oklab, ${COLORS.input} 70%, black); border: 1px solid color-mix(in oklab, ${COLORS.borderSoft} 55%, transparent); color: ${COLORS.muted}; font-size: 11px; line-height: 1.3; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; }
       .ths-mask-editor .ths-layers-list { display: flex; flex-direction: column; gap: 4px; }
-      .ths-mask-editor .ths-layer-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 4px; padding: 4px 5px; border-radius: 6px; border: 1px solid color-mix(in oklab, ${COLORS.borderSoft} 75%, transparent); background: color-mix(in oklab, ${COLORS.panel2} 65%, black); }
+      .ths-mask-editor .ths-layer-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px; padding: 4px 5px; border-radius: 6px; border: 1px solid color-mix(in oklab, ${COLORS.borderSoft} 75%, transparent); background: color-mix(in oklab, ${COLORS.panel2} 65%, black); }
       .ths-mask-editor .ths-layer-item[data-active="true"] { border-color: color-mix(in oklab, ${COLORS.accentStrong} 80%, transparent); background: color-mix(in oklab, ${COLORS.accentStrong} 13%, ${COLORS.panel2}); }
       .ths-mask-editor .ths-layer-item[data-disabled="true"] { opacity: 0.55; }
       .ths-mask-editor .ths-layer-main { display: flex; align-items: center; gap: 6px; min-width: 0; border: 0; background: transparent; color: ${COLORS.text}; text-align: left; padding: 2px 4px; min-height: 24px; min-block-size: 24px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500; }
@@ -840,6 +840,7 @@ function addStyles(root, instanceKey = "editor") {
       .ths-mask-editor .ths-mask-info-btn svg { width: 15px; height: 15px; }
       .ths-mask-editor .ths-mask-inspector .ths-mask-label { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 8px; }
       .ths-mask-editor .ths-mask-mode { display: flex !important; flex-direction: column; align-items: stretch; gap: 6px !important; }
+      .ths-mask-editor .ths-mask-mode[hidden] { display: none !important; }
       .ths-mask-editor .ths-mask-mode select { width: 100%; }
       .ths-mask-editor .ths-mask-settings { display: flex; flex-direction: column; gap: 8px; width: 100%; }
       .ths-mask-editor .ths-mask-setting-row { display: grid; grid-template-columns: 48px minmax(64px, 1fr) 54px auto; align-items: center; gap: 6px; width: 100%; min-width: 0; color: ${COLORS.muted}; font-size: 12px; line-height: 1.4; }
@@ -1173,13 +1174,20 @@ export function createUniversalMaskEditor(node, options = {}) {
     const brushLabel = labelControl("Размер", brushInput, brushReadout);
     settingsRow.append(brushLabel);
     const modeSelect = document.createElement("select");
-    for (const [value, text] of [["sam3", "Объект · SAM3"], ["optical_flow", "Область · Optical Flow"], ["keyframes", "Ручные ключи"], ["static", "Неподвижная маска"]]) { const option = document.createElement("option"); option.value = value; option.textContent = text; modeSelect.append(option); }
+    let sam3ModeOption = null;
+    for (const [value, text] of [["sam3", "Объект · SAM3"], ["optical_flow", "Область · Optical Flow"], ["keyframes", "Ручные ключи"], ["static", "Неподвижная маска"]]) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = text;
+        if (value === "sam3") sam3ModeOption = option;
+        modeSelect.append(option);
+    }
     modeSelect.setAttribute("aria-label", "Трекинг");
-    assignTooltipMetadata(modeSelect, "SAM3 — объект с двухэтапным расчётом; Optical Flow — область по движению; Ручные ключи; Неподвижная маска");
+    assignTooltipMetadata(modeSelect, "Тип трекинга для этого слоя: Optical Flow — движение; Ручные ключи; Неподвижная маска");
     const maskSettingsGroup = createElement("div", { display: "inline-flex", alignItems: "center", flexWrap: "wrap", gap: "12px" }, "ths-mask-settings");
     maskSettingsGroup.setAttribute("role", "group");
     maskSettingsGroup.setAttribute("aria-label", "Настройки маски");
-    const modeLabel = labelControl("Режим", modeSelect);
+    const modeLabel = labelControl("Трекинг слоя", modeSelect);
     modeLabel.className += " ths-mask-mode";
     const directionSelect = document.createElement("select");
     for (const [value, text] of [["forward", "вперёд"], ["backward", "назад"], ["both", "оба"]]) { const option = document.createElement("option"); option.value = value; option.textContent = text; directionSelect.append(option); }
@@ -1725,6 +1733,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         refinementBusy: false, refinementError: "", pendingQueue: null, pendingPromptId: null,
         sam3: { frameReady: false, trackReady: false, frame: null, seedToken: "", direction: "both", computedFrames: [], error: "", sourceKey: "", frameSignature: "", trackSignature: "", pendingAction: "" },
         layerSam3: new Map(), layerMaskFlags: new Map(),
+        serverLayerSignatures: new Map(), serverSingleLayerId: "",
         serverActiveLayerId: "", serverRefinedFrames: new Map(),
         pendingRequestKind: "", apiListeners: [],
     };
@@ -2026,6 +2035,39 @@ export function createUniversalMaskEditor(node, options = {}) {
         if (!active || layers.length <= 1) return false;
         return layers.some((layer) => layer.id !== active.id && layer.enabled !== false);
     }
+    function hasAnyEnabledLayer() {
+        return currentLayers().some((layer) => layer.enabled !== false);
+    }
+    function activeLayerEnabled() {
+        return activeLayer()?.enabled !== false;
+    }
+    function layerContentSignature(layer) {
+        if (!layer || typeof layer !== "object") return "";
+        try {
+            return JSON.stringify({
+                type: layer.type || "sam3",
+                start_frame: Number(layer.start_frame ?? 0),
+                end_frame: Number(layer.end_frame ?? -1),
+                frames: layer.frames || {},
+                anchors: Array.isArray(layer.anchors) ? layer.anchors : [],
+                sam3: layer.type === "sam3" && layer.sam3 ? {
+                    action: layer.sam3.action || "frame",
+                    frame: Number(layer.sam3.frame ?? 0),
+                    direction: layer.sam3.direction || "both",
+                    seed_token: layer.sam3.seed_token || "",
+                    prompt: layer.sam3.prompt || null,
+                    objects: layer.sam3.objects || null,
+                } : null,
+            });
+        } catch (_) {
+            return "";
+        }
+    }
+    function layersVisualSignature() {
+        return currentLayers()
+            .map((layer) => `${layer.id}:${layer.enabled === false ? 0 : 1}:${layer.blend || "add"}:${Number(layer.start_frame ?? 0)}:${Number(layer.end_frame ?? -1)}`)
+            .join("|");
+    }
     function layerSam3Prompted(layer) {
         if (!layer || layer.type !== "sam3") return false;
         if (Array.isArray(layer.sam3?.objects) && layer.sam3.objects.length > 0) return true;
@@ -2040,6 +2082,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         const layers = currentLayers();
         const active = activeLayer();
         if (layers.length <= 1) {
+            if (layers[0]?.enabled === false) return false;
             return sam3Mode() && !sam3TrackReady();
         }
         for (const layer of layers) {
@@ -2155,13 +2198,30 @@ export function createUniversalMaskEditor(node, options = {}) {
         updateReadouts();
         updateActionAvailability();
         draw();
+        const preview = selectedPreview();
+        const needsServerRefresh = target.enabled
+            && (target.type === "sam3" || target.type === "optical_flow")
+            && layerHasContent(target)
+            && state.serverLayerSignatures.get(target.id) !== layerContentSignature(target)
+            && !(preview?.layerMaskImages?.get(target.id) || (state.serverSingleLayerId === target.id && (preview?.rawMaskImage || preview?.maskImage)));
+        if (!hasAnyEnabledLayer()) {
+            setStatus(`Слой «${target.name}» скрыт — все слои маски выключены.`, "ready");
+        } else if (!target.enabled) {
+            setStatus(`Слой «${target.name}» скрыт.`, "ready");
+        } else if (needsServerRefresh) {
+            const actionName = target.type === "sam3" ? "Отследить видео" : "Рассчитать маску";
+            setStatus(`Слой «${target.name}» включён. Нажмите «${actionName}», чтобы обновить его превью.`, "dirty");
+        } else {
+            setStatus(`Слой «${target.name}» включён.`, "ready");
+        }
         return true;
     }
     function cycleLayerBlend(layerId) {
         if (state.mismatchBlocked || state.pendingPreview || state.pendingQueue) return false;
         saveCurrentLayerState();
         const layers = currentLayers();
-        const target = layers.find((item) => item.id === layerId);
+        const idx = layers.findIndex((item) => item.id === layerId);
+        const target = idx >= 0 ? layers[idx] : null;
         if (!target) return false;
         target.blend = nextBlendMode(target.blend);
         pushHistory(`Смешивание (${target.name}): ${blendLabel(target.blend)}`);
@@ -2169,6 +2229,11 @@ export function createUniversalMaskEditor(node, options = {}) {
         updateReadouts();
         updateActionAvailability();
         draw();
+        if (idx === 0 && target.blend !== "add") {
+            setStatus(`Первый слой в режиме «${blendLabel(target.blend)}» даст пустую маску — переключите на «+».`, "warn");
+        } else {
+            setStatus(`Смешивание (${target.name}): ${blendLabel(target.blend)}`, "ready");
+        }
         return true;
     }
     function moveLayer(layerId, delta) {
@@ -2197,6 +2262,7 @@ export function createUniversalMaskEditor(node, options = {}) {
         const [removed] = layers.splice(idx, 1);
         state.layerSam3.delete(removed.id);
         state.layerMaskFlags.delete(removed.id);
+        state.serverLayerSignatures.delete(removed.id);
         if (activeId === removed.id) {
             const fallback = layers[Math.min(idx, layers.length - 1)];
             activateLayerEntry(fallback);
@@ -2250,8 +2316,14 @@ export function createUniversalMaskEditor(node, options = {}) {
             blendBtn.setAttribute("data-blend", layer.blend);
             if (blendBtn.dataset) blendBtn.dataset.blend = layer.blend;
             blendBtn.setAttribute("aria-label", "Режим смешивания слоя");
-            setTooltip(blendBtn, `${blendLabel(layer.blend)} — нажмите для переключения (+ / − / ∩)`);
-            blendBtn.disabled = busy;
+            const isBaseAddOnly = idx === 0 && layer.blend === "add";
+            const blendTip = isBaseAddOnly
+                ? "Базовый (первый) слой всегда добавляет (+) — режимы − и ∩ работают для слоёв ниже"
+                : idx === 0 && layer.blend !== "add"
+                    ? `Первый слой в режиме «${blendLabel(layer.blend)}» обнулит маску — нажмите, чтобы вернуть «+»`
+                    : `${blendLabel(layer.blend)} — нажмите для переключения (+ / − / ∩)`;
+            setTooltip(blendBtn, blendTip);
+            blendBtn.disabled = busy || isBaseAddOnly;
             blendBtn.addEventListener("click", () => cycleLayerBlend(layer.id));
 
             const visBtn = button(disabledLayer ? "○" : "👁");
@@ -2298,6 +2370,12 @@ export function createUniversalMaskEditor(node, options = {}) {
 
     function updateActionAvailability() {
         const modeIsSam3 = sam3Mode();
+        modeLabel.hidden = modeIsSam3;
+        modeLabel.style.display = modeIsSam3 ? "none" : "";
+        if (sam3ModeOption) {
+            sam3ModeOption.hidden = !modeIsSam3;
+            sam3ModeOption.disabled = !modeIsSam3;
+        }
         const modeDescription = modeIsSam3
             ? "SAM3: прицел добавляет объекты. ＋ и − уточняют активный объект. Правый клик удаляет точку или объект."
             : safeMode(node, documentState) === "optical_flow"
@@ -2402,6 +2480,8 @@ export function createUniversalMaskEditor(node, options = {}) {
         state.imageCache.clear();
         state.imagePending.clear();
         state.serverRefinedFrames.clear();
+        state.serverLayerSignatures.clear();
+        state.serverSingleLayerId = "";
         state.missingFrame = false;
         state.previewUse = 0;
         maskPostprocessor.invalidate();
@@ -2977,10 +3057,25 @@ export function createUniversalMaskEditor(node, options = {}) {
             const refinementFailed = Boolean(state.refinementError || state.metadata?.refinement_error);
             const draft = mismatchBlocked || refinementFailed ? true : frameNeedsDraft(state.frame);
             const bucket = frameBucket(state.frame);
+            const layers = currentLayers();
             const currentLayer = activeLayer();
             const layerMode = safeMode(node, documentState);
             const otherLayersActive = hasOtherEnabledLayers();
+            const anyLayerEnabled = hasAnyEnabledLayer();
+            const activeEnabled = activeLayerEnabled();
             const activeBlend = currentLayer?.blend || "add";
+            const layerEventsFor = (layer) => {
+                if (!layer) return [];
+                if (layer.type === "static") {
+                    return Object.keys(layer.frames || {}).sort((a, b) => Number(a) - Number(b)).flatMap((key) => parseEvents(layer.frames[key]));
+                }
+                const direct = parseEvents(layer.frames?.[String(state.frame)]);
+                if (direct.length > 0 || layer.type !== "keyframes") return direct;
+                const keys = Object.keys(layer.frames || {}).map(Number).filter((k) => Number.isFinite(k) && parseEvents(layer.frames[String(k)]).length > 0);
+                if (!keys.length) return [];
+                keys.sort((a, b) => (Math.abs(a - state.frame) - Math.abs(b - state.frame)) || (a - b));
+                return parseEvents(layer.frames[String(keys[0])]);
+            };
             const staticEvents = layerMode === "static"
                 ? Object.keys(documentState.frames || {}).sort((a, b) => Number(a) - Number(b)).flatMap((key) => parseEvents(documentState.frames[key]))
                 : null;
@@ -2988,10 +3083,11 @@ export function createUniversalMaskEditor(node, options = {}) {
             const explicitClearBucket = Boolean(bucket && bucket.inherit === false && parseEvents(bucket).length === 0);
             const sam3ActiveBase = Boolean(
                 sam3Mode()
+                && activeEnabled
                 && !state.resetBlank
                 && !explicitClearBucket
                 && (sam3FrameReady() || sam3TrackReady())
-                && (preview.editBaseImage?.naturalWidth || preview.rawMaskImage?.naturalWidth || preview.maskImage?.naturalWidth)
+                && (preview.layerMaskImages?.get(currentLayer?.id)?.naturalWidth || preview.editBaseImage?.naturalWidth || preview.rawMaskImage?.naturalWidth || preview.maskImage?.naturalWidth)
             );
             const inherits = bucket ? (bucket.inherit === true || sam3ActiveBase) : (shouldInherit(state.frame) || sam3ActiveBase);
             const drawEventForLayer = (ev) => (activeBlend === "subtract" && ev?.mode !== "erase" ? { ...ev, mode: "erase" } : ev);
@@ -3012,124 +3108,297 @@ export function createUniversalMaskEditor(node, options = {}) {
 
             const forcedOutline = refinementFailed || state.refinementBusy;
             const isOutlineRect = (event) => Boolean(event && event.type === "rect" && event.mode !== "erase" && (forcedOutline || event.refine));
-            const savedRefined = (draft && !inherits && !otherLayersActive && !mismatchBlocked && !refinementFailed && !state.resetBlank)
-                ? state.serverRefinedFrames.get(layerMode === "static" ? "__static__" : String(state.frame))
-                : null;
-            const refinedMatch = Boolean(
-                savedRefined
-                && localEvents.length >= savedRefined.baseCount
-                && JSON.stringify(localEvents.slice(0, savedRefined.baseCount)) === savedRefined.prefixJson
-                && !localEvents.slice(savedRefined.baseCount).some(isOutlineRect)
-                && (preview.rawMaskImage?.naturalWidth || preview.maskImage?.naturalWidth)
+            const deferredOutlines = [];
+            const isInteractiveGesture = Boolean(state.active || state.ghost || state.penPath.length);
+            const visualSig = layersVisualSignature();
+            const hasPerLayerSources = layers.every((layer) => {
+                if (layer.enabled === false) return true;
+                if (layer.id === currentLayer?.id) return true;
+                if (preview.has_layer_masks || preview.layerMaskImages?.has(layer.id)) return true;
+                if (state.serverSingleLayerId === layer.id && (preview.rawMaskImage?.naturalWidth || preview.maskImage?.naturalWidth)) return true;
+                if (layer.type !== "sam3") return true;
+                const saved = state.layerSam3.get(layer.id);
+                return !layerHasContent(layer) && !saved?.frameReady && !saved?.trackReady;
+            });
+            const useMultiLayerComposite = Boolean(
+                anyLayerEnabled
+                && (layers.length > 1 || activeBlend !== "add")
+                && hasPerLayerSources
+                && !mismatchBlocked
+                && !refinementFailed
+                && !state.resetBlank
+                && typeof maskCtx.getImageData === "function"
+                && typeof maskCtx.putImageData === "function"
             );
 
-            if (mismatchBlocked || refinementFailed || state.resetBlank) {
-                baseline = null;
-                applyPostprocess = true;
-                replayLocal = draft && !mismatchBlocked;
-                baselineKind = "none";
-            } else if (draft) {
-                if (otherLayersActive && currentLayer?.id && state.serverActiveLayerId && currentLayer.id !== state.serverActiveLayerId) {
-                    baseline = preview.rawMaskImage || preview.maskImage || preview.editBaseImage;
-                } else if (inherits || otherLayersActive) {
-                    baseline = preview.editBaseImage || preview.rawMaskImage || preview.maskImage;
-                } else if (refinedMatch) {
-                    baseline = preview.rawMaskImage || preview.maskImage;
-                } else {
-                    baseline = null;
+            if (!anyLayerEnabled) {
+                if (state.view !== "source") {
+                    let imageData = null;
+                    if (typeof maskCtx.getImageData === "function" && typeof maskCtx.putImageData === "function") {
+                        try { imageData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height); } catch (_) { imageData = null; }
+                    }
+                    if (imageData?.data) {
+                        const postData = imageData.width && imageData.height
+                            ? imageData
+                            : { data: imageData.data, width: maskCanvas.width, height: maskCanvas.height };
+                        maskPostprocessor.processImageData(postData, {
+                            rawKey: `empty:${state.sourceGeneration}:${state.loadGeneration}:${state.frame}:${visualSig}:${workW}x${workH}`,
+                            growPx: 0,
+                            featherPx: 0,
+                            maskOnly: state.view === "mask",
+                            alpha: number(opacity.value, .38),
+                            applyPostprocess: false,
+                        });
+                        try { maskCtx.putImageData(imageData, 0, 0); } catch (_) { /* ignore */ }
+                    }
+                    ctx.save(); ctx.globalAlpha = 1; ctx.drawImage(maskCanvas, box.offsetX, box.offsetY, box.drawnWidth, box.drawnHeight); ctx.restore();
                 }
-                applyPostprocess = true;
-                replayLocal = true;
-                baselineKind = baseline === preview.editBaseImage ? "editBase" : baseline === preview.rawMaskImage ? "rawMask" : baseline ? "maskFallback" : "none";
-            } else if (!settingsDifferFromServer) {
-                baseline = preview.maskImage;
-                applyPostprocess = false;
-                replayLocal = false;
-                baselineKind = baseline ? "mask" : "none";
-            } else if (preview.rawMaskImage?.naturalWidth) {
-                baseline = preview.rawMaskImage;
-                applyPostprocess = true;
-                replayLocal = false;
-                baselineKind = "rawMask";
-            } else if (sam3Mode() && preview.editBaseImage?.naturalWidth) {
-                baseline = preview.editBaseImage;
-                applyPostprocess = true;
-                replayLocal = true;
-                baselineKind = "editBase";
-            } else if (eventsAt(state.frame).length === 0 && preview.editBaseImage?.naturalWidth) {
-                baseline = preview.editBaseImage;
-                applyPostprocess = true;
-                replayLocal = false;
-                baselineKind = "editBase";
-            } else if (preview.maskImage?.naturalWidth) {
-                baseline = preview.maskImage;
-                applyPostprocess = true;
-                replayLocal = false;
-                effGrow = Math.max(0, currentSettings.grow - (serverSettings?.grow ?? 0));
-                effFeather = Math.max(0, currentSettings.feather - (serverSettings?.feather ?? 0));
-                baselineKind = "maskFallback";
-            }
+            } else if (useMultiLayerComposite) {
+                const len = workW * workH;
+                const composite = new Uint8Array(len);
+                const activeSnap = currentLayer ? {
+                    ...currentLayer,
+                    type: layerMode,
+                    start_frame: widgetValue(node, "start_frame", currentLayer.start_frame ?? 0),
+                    end_frame: widgetValue(node, "end_frame", currentLayer.end_frame ?? -1),
+                    frames: documentState.frames || {},
+                    anchors: Array.isArray(documentState.anchors) ? documentState.anchors : [],
+                    ...(layerMode === "sam3" && documentState.sam3 ? { sam3: documentState.sam3 } : {}),
+                } : null;
 
-            const deferredOutlines = [];
-            if (baseline?.naturalWidth) maskCtx.drawImage(baseline, 0, 0, workW, workH);
-            if (replayLocal && !mismatchBlocked) {
-                const replayEvents = refinedMatch ? localEvents.slice(savedRefined.baseCount) : localEvents;
-                for (const event of replayEvents) {
-                    if (isOutlineRect(event)) {
-                        if (draft) deferredOutlines.push(event);
-                    } else {
-                        drawEvent(maskCtx, drawEventForLayer(event), maskBox, true);
+                for (const layer of layers) {
+                    if (layer.enabled === false) continue;
+                    const lStart = Math.max(0, Math.round(number(layer.id === currentLayer?.id ? activeSnap?.start_frame : layer.start_frame, 0)));
+                    const lEndRaw = Math.round(number(layer.id === currentLayer?.id ? activeSnap?.end_frame : layer.end_frame, -1));
+                    const inRange = state.frame >= lStart && (lEndRaw < 0 || state.frame <= lEndRaw);
+                    const lBlend = layer.blend || "add";
+                    if (!inRange) {
+                        if (lBlend === "intersect") composite.fill(0);
+                        continue;
+                    }
+                    maskCtx.setTransform(1, 0, 0, 1, 0, 0);
+                    maskCtx.clearRect(0, 0, workW, workH);
+
+                    const effectiveLayer = layer.id === currentLayer?.id && activeSnap ? activeSnap : layer;
+                    const serverSig = state.serverLayerSignatures.get(layer.id);
+                    const clean = Boolean(serverSig && serverSig === layerContentSignature(effectiveLayer));
+                    const serverImg = preview.layerMaskImages?.get(layer.id)
+                        || (state.serverSingleLayerId === layer.id ? (preview.rawMaskImage || preview.maskImage) : null);
+
+                    if (clean && serverImg?.naturalWidth) {
+                        maskCtx.drawImage(serverImg, 0, 0, workW, workH);
+                    } else if (!(clean && preview.has_layer_masks)) {
+                        if (layer.id === currentLayer?.id) {
+                            const activeBaseImg = preview.layerMaskImages?.get(layer.id)
+                                || (state.serverSingleLayerId === layer.id ? (preview.editBaseImage || preview.rawMaskImage || preview.maskImage) : null);
+                            if (inherits && activeBaseImg?.naturalWidth) {
+                                maskCtx.drawImage(activeBaseImg, 0, 0, workW, workH);
+                            }
+                            for (const event of localEvents) {
+                                if (isOutlineRect(event)) {
+                                    if (draft) deferredOutlines.push(event);
+                                } else {
+                                    drawEvent(maskCtx, event, maskBox, true);
+                                }
+                            }
+                            if (state.ghost) {
+                                if (state.ghost.type === "rect" && state.ghost.mode !== "erase" && (state.refinementBusy || state.ghost.refine)) {
+                                    deferredOutlines.push(state.ghost);
+                                } else {
+                                    drawEvent(maskCtx, state.ghost, maskBox, true);
+                                }
+                            }
+                            if (state.penPath.length >= 2) {
+                                const penPreviewPoints = flattenPenPath(state.penPath, { closed: true });
+                                if (penPreviewPoints.length >= 3) drawEvent(maskCtx, { type: "polygon", mode: "add", points: penPreviewPoints }, maskBox, true);
+                            }
+                        } else if (serverImg?.naturalWidth && (effectiveLayer.type === "sam3" || (effectiveLayer.type === "optical_flow" && parseEvents(effectiveLayer.frames?.[String(state.frame)]).length === 0))) {
+                            maskCtx.drawImage(serverImg, 0, 0, workW, workH);
+                            for (const event of parseEvents(effectiveLayer.frames?.[String(state.frame)])) {
+                                if (!isOutlineRect(event)) drawEvent(maskCtx, event, maskBox, true);
+                            }
+                        } else if (effectiveLayer.type !== "sam3") {
+                            for (const event of layerEventsFor(effectiveLayer)) {
+                                if (!isOutlineRect(event)) drawEvent(maskCtx, event, maskBox, true);
+                            }
+                        }
+                    }
+
+                    let layerData = null;
+                    try { layerData = maskCtx.getImageData(0, 0, workW, workH)?.data; } catch (_) { layerData = null; }
+                    if (!layerData || layerData.length < len * 4) continue;
+                    for (let i = 0, p = 0; i < len; i += 1, p += 4) {
+                        const a = layerData[p + 3];
+                        let alphaVal = 0;
+                        if (a > 0) {
+                            const r = layerData[p];
+                            const g = layerData[p + 1];
+                            const b = layerData[p + 2];
+                            const lum = r === g && g === b ? r : 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                            alphaVal = a === 255 ? Math.round(lum) : Math.round((lum * a) / 255);
+                        }
+                        if (lBlend === "subtract") {
+                            const nextVal = composite[i] - alphaVal;
+                            composite[i] = nextVal > 0 ? nextVal : 0;
+                        } else if (lBlend === "intersect") {
+                            if (alphaVal < composite[i]) composite[i] = alphaVal;
+                        } else if (alphaVal > composite[i]) {
+                            composite[i] = alphaVal;
+                        }
                     }
                 }
-            }
-            if (state.ghost && !mismatchBlocked) {
-                if (state.ghost.type === "rect" && state.ghost.mode !== "erase" && (state.refinementBusy || state.ghost.refine)) {
-                    deferredOutlines.push(state.ghost);
-                } else {
-                    drawEvent(maskCtx, drawEventForLayer(state.ghost), maskBox, true);
-                }
-            }
-            if (state.penPath.length >= 2) {
-                const penPreviewPoints = flattenPenPath(state.penPath, { closed: true });
-                if (penPreviewPoints.length >= 3) drawEvent(maskCtx, { type: "polygon", mode: activeBlend === "subtract" ? "erase" : "add", points: penPreviewPoints }, maskBox, true);
-            }
-            if (state.view !== "source") {
-                const maskOnly = state.view === "mask";
-                const alpha = number(opacity.value, .38);
-                let imageData = null;
-                if (typeof maskCtx.getImageData === "function" && typeof maskCtx.putImageData === "function") {
+
+                if (state.view !== "source") {
+                    let imageData = null;
                     try { imageData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height); } catch (_) { imageData = null; }
+                    if (imageData?.data) {
+                        const pixels = imageData.data;
+                        for (let i = 0, p = 0; i < len; i += 1, p += 4) {
+                            const v = composite[i];
+                            pixels[p] = v;
+                            pixels[p + 1] = v;
+                            pixels[p + 2] = v;
+                            pixels[p + 3] = v > 0 ? 255 : 0;
+                        }
+                        const postData = imageData.width && imageData.height
+                            ? imageData
+                            : { data: imageData.data, width: maskCanvas.width, height: maskCanvas.height };
+                        const rawKey = isInteractiveGesture
+                            ? ""
+                            : `${state.sourceGeneration}:${state.loadGeneration}:${state.frame}:${state.editRevision}:${Number(preview.lastUsed || 0)}:ml:${visualSig}:${workW}x${workH}`;
+                        maskPostprocessor.processImageData(postData, {
+                            rawKey,
+                            growPx: effGrow * pxScale,
+                            featherPx: effFeather * pxScale,
+                            maskOnly: state.view === "mask",
+                            alpha: number(opacity.value, .38),
+                            applyPostprocess: true,
+                        });
+                        try { maskCtx.putImageData(imageData, 0, 0); } catch (_) { /* ignore */ }
+                    }
+                    ctx.save(); ctx.globalAlpha = 1; ctx.drawImage(maskCanvas, box.offsetX, box.offsetY, box.drawnWidth, box.drawnHeight); ctx.restore();
                 }
-                if (imageData?.data) {
-                    const postData = imageData.width && imageData.height
-                        ? imageData
-                        : { data: imageData.data, width: maskCanvas.width, height: maskCanvas.height };
-                    const baselineTag = baseline === preview.rawMaskImage ? "raw"
-                        : baseline === preview.editBaseImage ? "base"
-                        : baseline === preview.maskImage ? "mask"
-                        : "none";
-                    const isInteractiveGesture = Boolean(state.active || state.ghost || state.penPath.length);
-                    const rawKey = isInteractiveGesture
-                        ? ""
-                        : `${state.sourceGeneration}:${state.loadGeneration}:${state.frame}:${state.editRevision}:${Number(preview.lastUsed || 0)}:${draft ? 1 : 0}:${replayLocal ? 1 : 0}:${state.resetBlank ? 1 : 0}:${baselineKind}:${baselineTag}:${currentLayer?.id || ""}:${activeBlend}:${otherLayersActive ? 1 : 0}:${refinedMatch ? 1 : 0}:${workW}x${workH}`;
-                    maskPostprocessor.processImageData(postData, {
-                        rawKey,
-                        growPx: effGrow * pxScale,
-                        featherPx: effFeather * pxScale,
-                        maskOnly,
-                        alpha,
-                        applyPostprocess,
-                    });
-                    try { maskCtx.putImageData(imageData, 0, 0); } catch (_) { /* ignore */ }
+                for (const outlineEvent of deferredOutlines) {
+                    drawEvent(ctx, outlineEvent, box, state.view === "mask", { outlineOnly: true });
                 }
-                ctx.save(); ctx.globalAlpha = 1; ctx.drawImage(maskCanvas, box.offsetX, box.offsetY, box.drawnWidth, box.drawnHeight); ctx.restore();
-            }
-            for (const outlineEvent of deferredOutlines) {
-                drawEvent(ctx, outlineEvent, box, state.view === "mask", { outlineOnly: true });
+            } else {
+                const savedRefined = (draft && !inherits && !otherLayersActive && !mismatchBlocked && !refinementFailed && !state.resetBlank)
+                    ? state.serverRefinedFrames.get(layerMode === "static" ? "__static__" : String(state.frame))
+                    : null;
+                const refinedMatch = Boolean(
+                    savedRefined
+                    && localEvents.length >= savedRefined.baseCount
+                    && JSON.stringify(localEvents.slice(0, savedRefined.baseCount)) === savedRefined.prefixJson
+                    && !localEvents.slice(savedRefined.baseCount).some(isOutlineRect)
+                    && (preview.rawMaskImage?.naturalWidth || preview.maskImage?.naturalWidth)
+                );
+
+                if (mismatchBlocked || refinementFailed || state.resetBlank) {
+                    baseline = null;
+                    applyPostprocess = true;
+                    replayLocal = draft && !mismatchBlocked && activeEnabled;
+                    baselineKind = "none";
+                } else if (draft) {
+                    if (otherLayersActive && currentLayer?.id && state.serverActiveLayerId && currentLayer.id !== state.serverActiveLayerId) {
+                        baseline = preview.rawMaskImage || preview.maskImage || preview.editBaseImage;
+                    } else if (inherits || otherLayersActive) {
+                        baseline = preview.editBaseImage || preview.rawMaskImage || preview.maskImage;
+                    } else if (refinedMatch) {
+                        baseline = preview.rawMaskImage || preview.maskImage;
+                    } else {
+                        baseline = null;
+                    }
+                    applyPostprocess = true;
+                    replayLocal = activeEnabled;
+                    baselineKind = baseline === preview.editBaseImage ? "editBase" : baseline === preview.rawMaskImage ? "rawMask" : baseline ? "maskFallback" : "none";
+                } else if (!settingsDifferFromServer) {
+                    baseline = preview.maskImage;
+                    applyPostprocess = false;
+                    replayLocal = false;
+                    baselineKind = baseline ? "mask" : "none";
+                } else if (preview.rawMaskImage?.naturalWidth) {
+                    baseline = preview.rawMaskImage;
+                    applyPostprocess = true;
+                    replayLocal = false;
+                    baselineKind = "rawMask";
+                } else if (sam3Mode() && preview.editBaseImage?.naturalWidth) {
+                    baseline = preview.editBaseImage;
+                    applyPostprocess = true;
+                    replayLocal = activeEnabled;
+                    baselineKind = "editBase";
+                } else if (eventsAt(state.frame).length === 0 && preview.editBaseImage?.naturalWidth) {
+                    baseline = preview.editBaseImage;
+                    applyPostprocess = true;
+                    replayLocal = false;
+                    baselineKind = "editBase";
+                } else if (preview.maskImage?.naturalWidth) {
+                    baseline = preview.maskImage;
+                    applyPostprocess = true;
+                    replayLocal = false;
+                    effGrow = Math.max(0, currentSettings.grow - (serverSettings?.grow ?? 0));
+                    effFeather = Math.max(0, currentSettings.feather - (serverSettings?.feather ?? 0));
+                    baselineKind = "maskFallback";
+                }
+
+                if (baseline?.naturalWidth) maskCtx.drawImage(baseline, 0, 0, workW, workH);
+                if (replayLocal && !mismatchBlocked && activeEnabled) {
+                    const replayEvents = refinedMatch ? localEvents.slice(savedRefined.baseCount) : localEvents;
+                    for (const event of replayEvents) {
+                        if (isOutlineRect(event)) {
+                            if (draft) deferredOutlines.push(event);
+                        } else {
+                            drawEvent(maskCtx, drawEventForLayer(event), maskBox, true);
+                        }
+                    }
+                }
+                if (state.ghost && !mismatchBlocked && activeEnabled) {
+                    if (state.ghost.type === "rect" && state.ghost.mode !== "erase" && (state.refinementBusy || state.ghost.refine)) {
+                        deferredOutlines.push(state.ghost);
+                    } else {
+                        drawEvent(maskCtx, drawEventForLayer(state.ghost), maskBox, true);
+                    }
+                }
+                if (state.penPath.length >= 2 && activeEnabled) {
+                    const penPreviewPoints = flattenPenPath(state.penPath, { closed: true });
+                    if (penPreviewPoints.length >= 3) drawEvent(maskCtx, { type: "polygon", mode: activeBlend === "subtract" ? "erase" : "add", points: penPreviewPoints }, maskBox, true);
+                }
+                if (state.view !== "source") {
+                    const maskOnly = state.view === "mask";
+                    const alpha = number(opacity.value, .38);
+                    let imageData = null;
+                    if (typeof maskCtx.getImageData === "function" && typeof maskCtx.putImageData === "function") {
+                        try { imageData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height); } catch (_) { imageData = null; }
+                    }
+                    if (imageData?.data) {
+                        const postData = imageData.width && imageData.height
+                            ? imageData
+                            : { data: imageData.data, width: maskCanvas.width, height: maskCanvas.height };
+                        const baselineTag = baseline === preview.rawMaskImage ? "raw"
+                            : baseline === preview.editBaseImage ? "base"
+                            : baseline === preview.maskImage ? "mask"
+                            : "none";
+                        const rawKey = isInteractiveGesture
+                            ? ""
+                            : `${state.sourceGeneration}:${state.loadGeneration}:${state.frame}:${state.editRevision}:${Number(preview.lastUsed || 0)}:${draft ? 1 : 0}:${replayLocal ? 1 : 0}:${state.resetBlank ? 1 : 0}:${baselineKind}:${baselineTag}:${currentLayer?.id || ""}:${activeBlend}:${otherLayersActive ? 1 : 0}:${refinedMatch ? 1 : 0}:${visualSig}:${workW}x${workH}`;
+                        maskPostprocessor.processImageData(postData, {
+                            rawKey,
+                            growPx: effGrow * pxScale,
+                            featherPx: effFeather * pxScale,
+                            maskOnly,
+                            alpha,
+                            applyPostprocess,
+                        });
+                        try { maskCtx.putImageData(imageData, 0, 0); } catch (_) { /* ignore */ }
+                    }
+                    ctx.save(); ctx.globalAlpha = 1; ctx.drawImage(maskCanvas, box.offsetX, box.offsetY, box.drawnWidth, box.drawnHeight); ctx.restore();
+                }
+                for (const outlineEvent of deferredOutlines) {
+                    drawEvent(ctx, outlineEvent, box, state.view === "mask", { outlineOnly: true });
+                }
             }
         }
         const sam3Badge = sam3Mode() ? ` · SAM3 ${sam3TrackReady() ? "трек" : sam3FrameReady() ? "кадр" : "черновик"}` : "";
-        const pointObjects = sam3Mode() ? sam3Objects() : [];
+        const pointObjects = sam3Mode() && activeLayerEnabled() ? sam3Objects() : [];
         const drawPointMarker = (xPos, yPos, positive, active, badgeIndex = null) => {
             const x = box.offsetX + xPos * box.drawnWidth, y = box.offsetY + yPos * box.drawnHeight;
             ctx.fillStyle = positive ? "#247b45" : "#a32b35"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
@@ -3283,10 +3552,13 @@ export function createUniversalMaskEditor(node, options = {}) {
             mask: item.mask || item.maskDescriptor || item.mask_url,
             raw_mask: item.raw_mask || item.rawMask || item.raw_mask_url,
             edit_base: item.edit_base || item.editBase || item.edit_base_descriptor,
+            has_layer_masks: Boolean(item.has_layer_masks),
+            ...(item.layer_masks && typeof item.layer_masks === "object" ? { layer_masks: item.layer_masks } : {}),
             ...(item.sourceImage ? { sourceImage: item.sourceImage } : {}),
             ...(item.maskImage ? { maskImage: item.maskImage } : {}),
             ...(item.rawMaskImage ? { rawMaskImage: item.rawMaskImage } : {}),
             ...(item.editBaseImage ? { editBaseImage: item.editBaseImage } : {}),
+            ...(item.layerMaskImages ? { layerMaskImages: item.layerMaskImages } : {}),
         };
     }
 
@@ -3315,6 +3587,15 @@ export function createUniversalMaskEditor(node, options = {}) {
         const maskImage = descriptor.maskImage || await loadImage(descriptor.mask, `mask:${frame}`);
         const rawMaskImage = descriptor.rawMaskImage || await loadImage(descriptor.raw_mask, `raw_mask:${frame}`);
         const editBaseImage = descriptor.editBaseImage || await loadImage(descriptor.edit_base, `edit_base:${frame}`);
+        const layerMaskImages = descriptor.layerMaskImages instanceof Map ? new Map(descriptor.layerMaskImages) : new Map();
+        if (descriptor.layer_masks && typeof descriptor.layer_masks === "object") {
+            for (const [layerId, layerDesc] of Object.entries(descriptor.layer_masks)) {
+                if (!layerMaskImages.has(layerId)) {
+                    const layerImg = await loadImage(layerDesc, `layer:${layerId}:${frame}`);
+                    if (layerImg) layerMaskImages.set(layerId, layerImg);
+                }
+            }
+        }
         if (generation !== state.loadGeneration || expectedSource !== (state.source?.fingerprint || state.sourceGeneration)) {
             if (!prefetch) diagnostics.record("frame.discarded", { frame, generation });
             return null;
@@ -3323,7 +3604,15 @@ export function createUniversalMaskEditor(node, options = {}) {
             if (!prefetch && frame === state.frame) { state.missingFrame = true; empty.textContent = `Не удалось загрузить кадр ${frame + 1}. Проверьте preview /view.`; setStatus(`Ошибка загрузки кадра ${frame + 1}.`, "error"); draw(); }
             return null;
         }
-        cachePreview(frame, { sourceImage, maskImage, rawMaskImage, editBaseImage, edit_base: descriptor.edit_base });
+        cachePreview(frame, {
+            sourceImage,
+            maskImage,
+            rawMaskImage,
+            editBaseImage,
+            edit_base: descriptor.edit_base,
+            has_layer_masks: Boolean(descriptor.has_layer_masks),
+            ...(layerMaskImages.size ? { layerMaskImages } : {}),
+        });
         if (!prefetch && frame === state.frame) state.missingFrame = false;
         if (!prefetch && frame === state.frame) {
             const needsUpdate = state.previewStale || state.previewSignature !== documentSignature();
@@ -3356,8 +3645,10 @@ export function createUniversalMaskEditor(node, options = {}) {
                 mask: allowMask ? (item.mask || item.mask_url) : null,
                 edit_base: allowMask ? item.edit_base : null,
                 ...(rawMask ? { raw_mask: rawMask } : {}),
+                ...(allowMask && item.has_layer_masks ? { has_layer_masks: true } : {}),
+                ...(allowMask && item.layer_masks && typeof item.layer_masks === "object" ? { layer_masks: clone(item.layer_masks) } : {}),
             };
-            if (!allowMask) for (const key of ["mask_url", "maskDescriptor", "raw_mask", "rawMask", "raw_mask_url", "edit_base_descriptor", "editBase", "edit_base"]) delete descriptor[key];
+            if (!allowMask) for (const key of ["mask_url", "maskDescriptor", "raw_mask", "rawMask", "raw_mask_url", "edit_base_descriptor", "editBase", "edit_base", "has_layer_masks", "layer_masks", "layerMaskImages"]) delete descriptor[key];
             state.frameItems.set(frame, descriptor);
         }
         const previews = Array.isArray(output.universal_mask_preview) ? output.universal_mask_preview : [];
@@ -3366,6 +3657,8 @@ export function createUniversalMaskEditor(node, options = {}) {
             const existing = state.frameItems.get(frame) || {};
             const rawMask = allowMask ? (item.raw_mask || item.rawMask || item.raw_mask_url || existing.raw_mask || existing.rawMask || existing.raw_mask_url) : null;
             const editBase = allowMask ? (item.edit_base || item.editBase || item.edit_base_descriptor || existing.edit_base || existing.editBase || existing.edit_base_descriptor || null) : null;
+            const layerMasks = allowMask ? (item.layer_masks && typeof item.layer_masks === "object" ? item.layer_masks : existing.layer_masks) : null;
+            const hasLayerMasks = allowMask ? Boolean(item.has_layer_masks || existing.has_layer_masks) : false;
             const descriptor = {
                 ...existing,
                 ...item,
@@ -3373,8 +3666,10 @@ export function createUniversalMaskEditor(node, options = {}) {
                 mask: allowMask ? (item.mask_url || item.mask || existing.mask || null) : null,
                 edit_base: editBase,
                 ...(rawMask ? { raw_mask: rawMask } : {}),
+                ...(hasLayerMasks ? { has_layer_masks: true } : {}),
+                ...(layerMasks && typeof layerMasks === "object" ? { layer_masks: clone(layerMasks) } : {}),
             };
-            if (!allowMask) for (const key of ["mask_url", "maskDescriptor", "raw_mask", "rawMask", "raw_mask_url", "edit_base_descriptor", "editBase", "edit_base"]) delete descriptor[key];
+            if (!allowMask) for (const key of ["mask_url", "maskDescriptor", "raw_mask", "rawMask", "raw_mask_url", "edit_base_descriptor", "editBase", "edit_base", "has_layer_masks", "layer_masks", "layerMaskImages"]) delete descriptor[key];
             state.frameItems.set(frame, descriptor);
         }
     }
@@ -3391,6 +3686,8 @@ export function createUniversalMaskEditor(node, options = {}) {
                 edit_base: frame === patch.frame ? patch.edit_base : null,
             };
             if (frame === patch.frame && patch.raw_mask) nextItem.raw_mask = patch.raw_mask;
+            if (frame === patch.frame && patch.has_layer_masks) nextItem.has_layer_masks = true;
+            if (frame === patch.frame && patch.layer_masks && typeof patch.layer_masks === "object") nextItem.layer_masks = clone(patch.layer_masks);
             state.frameItems.set(frame, nextItem);
         }
         for (const [frame, preview] of state.previews) {
@@ -3405,6 +3702,9 @@ export function createUniversalMaskEditor(node, options = {}) {
     function applySam3Metadata(rawSam3, completedRequestKind = "") {
         if (!sam3Mode()) return;
         const meta = rawSam3 && typeof rawSam3 === "object" ? rawSam3 : {};
+        if (activeLayer()?.enabled === false && !meta.frame_ready && !meta.track_ready && !meta.error) {
+            return;
+        }
         const pendingAction = completedRequestKind === "sam3_frame" ? "frame" : completedRequestKind === "sam3_track" ? "track" : "";
         const returnedToken = String(meta.seed_token || "");
         const expectedToken = String(state.sam3.seedToken || documentState.sam3?.seed_token || "");
@@ -3562,12 +3862,23 @@ export function createUniversalMaskEditor(node, options = {}) {
         if (currentActiveLayer?.type === "sam3") {
             state.layerSam3.set(currentActiveLayer.id, clone(state.sam3));
         }
+        syncActiveLayerToList(documentState, {
+            mode: safeMode(node, documentState),
+            startFrame: widgetValue(node, "start_frame", 0),
+            endFrame: widgetValue(node, "end_frame", -1),
+        });
         if (Array.isArray(rawMeta?.layers)) {
+            const enabledServerLayers = rawMeta.layers.filter((item) => item && item.enabled !== false);
+            state.serverSingleLayerId = !rawMeta?.has_per_layer_masks && enabledServerLayers.length === 1
+                ? String(enabledServerLayers[0].id || "")
+                : "";
             const layers = currentLayers();
             for (const item of rawMeta.layers) {
                 if (!item || typeof item !== "object") continue;
                 const layerId = String(item.id || "");
-                state.layerMaskFlags.set(layerId, Boolean(item.has_mask));
+                if (item.enabled !== false) {
+                    state.layerMaskFlags.set(layerId, Boolean(item.has_mask));
+                }
                 const localLayer = layers.find((entry) => entry.id === layerId);
                 if (localLayer?.type === "sam3" && item.sam3 && typeof item.sam3 === "object") {
                     const returnedToken = String(item.sam3.seed_token || "");
@@ -3590,7 +3901,21 @@ export function createUniversalMaskEditor(node, options = {}) {
                         });
                     }
                 }
+                if (localLayer && item.enabled !== false) {
+                    const sam3Computed = item.type === "sam3" && (
+                        Boolean(item.sam3?.track_ready)
+                        || Boolean(item.sam3?.frame_ready)
+                        || (layerId === currentActiveLayer?.id && (Boolean(rawMeta?.sam3?.track_ready) || Boolean(rawMeta?.sam3?.frame_ready)))
+                    );
+                    if (item.type !== "sam3" || sam3Computed) {
+                        state.serverLayerSignatures.set(layerId, layerContentSignature(localLayer));
+                    }
+                }
             }
+        } else if (currentActiveLayer && currentActiveLayer.enabled !== false) {
+            state.serverSingleLayerId = currentActiveLayer.id;
+            state.serverLayerSignatures.set(currentActiveLayer.id, layerContentSignature(currentActiveLayer));
+            state.layerMaskFlags.set(currentActiveLayer.id, Boolean(rawMeta?.has_mask));
         }
         if (framePatch?.object_map) {
             state.sam3HitMap = { url: framePatch.object_map, signature: sam3SeedSignature(framePatch.frame) };
@@ -3940,6 +4265,7 @@ export function createUniversalMaskEditor(node, options = {}) {
 
     canvas.addEventListener("pointerdown", (event) => {
         if (state.playing || state.mismatchBlocked || event.button !== 0 || event.altKey || event.shiftKey || state.panning) return;
+        if (!activeLayerEnabled()) { setStatus("Активный слой скрыт — включите его (○ → 👁) или выберите другой слой для рисования.", "warn"); return; }
         canvas.focus?.({ preventScroll: true }); const point = pointFromEvent(event); if (!point) return;
         if (state.mode.startsWith("sam_")) {
             if (!sam3Mode() || state.pendingPreview || state.pendingQueue) { setStatus("Дождитесь предпросмотра или отмените текущий запрос.", "busy"); return; }
@@ -4307,6 +4633,8 @@ export function createUniversalMaskEditor(node, options = {}) {
         if (state.mismatchBlocked) { setStatus("Источник не совпадает с сохранённой маской. Сначала примите новый клип или восстановите прежнюю маску.", "warn"); return; }
         state.layerSam3.clear();
         state.layerMaskFlags.clear();
+        state.serverLayerSignatures.clear();
+        state.serverSingleLayerId = "";
         replaceDocument(documentState, { version: 1, frames: {}, source: state.source || undefined, tracking_mode: safeMode(node, documentState), ...(sam3Mode() ? { sam3: { action: "frame", frame: state.frame, direction: sam3Direction(directionSelect.value), seed_token: "" } } : {}) });
         ensureDocumentLayers(documentState, {
             mode: safeMode(node, documentState),
@@ -4565,6 +4893,8 @@ export function createUniversalMaskEditor(node, options = {}) {
         replaceDocument(documentState, { version: 1, frames: {}, source: clone(pending.source), tracking_mode: safeMode(node, documentState), ...(safeMode(node, documentState) === "sam3" ? { sam3: { action: "frame", frame: 0, direction: sam3Direction(directionSelect.value), seed_token: "" } } : {}) });
         state.layerSam3.clear();
         state.layerMaskFlags.clear();
+        state.serverLayerSignatures.clear();
+        state.serverSingleLayerId = "";
         ensureDocumentLayers(documentState, { mode: safeMode(node, documentState), startFrame: 0, endFrame: -1 });
         setWidget(node, "start_frame", 0);
         setWidget(node, "end_frame", -1);
@@ -4610,6 +4940,8 @@ export function createUniversalMaskEditor(node, options = {}) {
         replaceDocument(documentState, restoredDocument || { version: 1, frames: {} });
         state.layerSam3.clear();
         state.layerMaskFlags.clear();
+        state.serverLayerSignatures.clear();
+        state.serverSingleLayerId = "";
         if (backup.mask_data !== undefined) setWidget(node, "mask_data", typeof backup.mask_data === "string" ? backup.mask_data : JSON.stringify(backup.mask_data));
         for (const name of ["tracking_mode", "grow", "feather", "start_frame", "end_frame"]) if (backup[name] !== undefined) setWidget(node, name, backup[name]);
         ensureDocumentLayers(documentState, {
@@ -4680,6 +5012,8 @@ export function createUniversalMaskEditor(node, options = {}) {
             : undefined;
         state.layerSam3.clear();
         state.layerMaskFlags.clear();
+        state.serverLayerSignatures.clear();
+        state.serverSingleLayerId = "";
         replaceDocument(documentState, {
             version: 1,
             frames: {},
@@ -4713,6 +5047,8 @@ export function createUniversalMaskEditor(node, options = {}) {
         state.dismissedAlertKey = "";
         state.refinementError = "";
         state.serverRefinedFrames.clear();
+        state.serverLayerSignatures.clear();
+        state.serverSingleLayerId = "";
         state.serverActiveLayerId = "";
         state.sam3 = {
             ...state.sam3,
@@ -4838,6 +5174,8 @@ export function createUniversalMaskEditor(node, options = {}) {
         diagnostics.record("widget.sync", { force, maskChanged, settingsChanged: settingsSnapshot !== state.maskSettingsSnapshot, modeChanged });
         state.layerSam3.clear();
         state.layerMaskFlags.clear();
+        state.serverLayerSignatures.clear();
+        state.serverSingleLayerId = "";
         const loadedDoc = readDocument(node);
         const hadLayers = Array.isArray(loadedDoc.layers) && loadedDoc.layers.length > 0;
         replaceDocument(documentState, loadedDoc);

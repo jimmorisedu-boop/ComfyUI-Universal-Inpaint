@@ -644,3 +644,56 @@ def test_encode_preview_assets_optional_edit_base_and_raw_mask():
     assert fallback[0]["edit_base"].startswith("data:image/png;base64,")
     assert fallback[0]["raw_mask"].startswith("data:image/png;base64,")
 
+
+def test_build_mask_sequence_and_cache_preview_emit_per_layer_masks(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    images = np.zeros((4, 40, 60, 3), dtype=np.float32)
+    doc = {
+        "layers": [
+            {
+                "id": "l-1",
+                "type": "static",
+                "blend": "add",
+                "enabled": True,
+                "start_frame": 0,
+                "end_frame": 3,
+                "frames": {"0": {"events": [{"type": "rect", "mode": "add", "x": 0.1, "y": 0.1, "w": 0.25, "h": 0.25}]}},
+            },
+            {
+                "id": "l-2",
+                "type": "static",
+                "blend": "add",
+                "enabled": True,
+                "start_frame": 2,
+                "end_frame": 3,
+                "frames": {"0": {"events": [{"type": "rect", "mode": "add", "x": 0.6, "y": 0.5, "w": 0.25, "h": 0.3}]}},
+            },
+        ],
+        "active_layer_id": "l-1",
+    }
+    mask, _parsed, _anchors, _eb, _sm, _raw, _lmeta, layer_masks = build_mask_sequence(
+        images,
+        doc,
+        tracking_mode="static",
+        grow=0,
+        feather=0,
+        return_edit_bases=True,
+        return_sam3_meta=True,
+        return_raw_mask=True,
+        return_layers_meta=True,
+        return_layer_masks=True,
+    )
+    assert set(layer_masks.keys()) == {"l-1", "l-2"}
+    assert layer_masks["l-1"].shape == (4, 40, 60)
+    assert not np.any(layer_masks["l-2"][0] > 0) and np.any(layer_masks["l-2"][2] > 0)
+
+    monkeypatch.setitem(sys.modules, "folder_paths", types.SimpleNamespace(get_temp_directory=lambda: str(tmp_path)))
+    descriptors, info = cache_preview_assets(images, mask, layer_masks=layer_masks)
+    assert info["available"] is True and len(descriptors) == 4
+    assert descriptors[0]["has_layer_masks"] is True
+    assert "l-1" in descriptors[0]["layer_masks"]
+    assert "l-2" not in descriptors[0]["layer_masks"]
+    assert "l-2" in descriptors[2]["layer_masks"]
+

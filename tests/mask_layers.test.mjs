@@ -327,4 +327,246 @@ assert.equal(queueBtn.disabled, false, "empty SAM3 layer does not block Queue wh
 
 reloadEditor.destroy();
 editor.destroy();
+
+// 3. Visibility (👁), base-layer blend lock (+), Трекинг слоя dropdown visibility, and live pixel compositing.
+class PixelCanvas extends FakeElement {
+    constructor() {
+        super("canvas");
+        this.width = 40;
+        this.height = 30;
+        this._pixels = new Uint8ClampedArray(40 * 30 * 4);
+        this.drawCalls = [];
+        this.arcCalls = [];
+        this.ctx = {
+            fillStyle: "#fff",
+            strokeStyle: "#fff",
+            lineWidth: 1,
+            lineCap: "round",
+            lineJoin: "round",
+            globalAlpha: 1,
+            globalCompositeOperation: "source-over",
+            setTransform() {},
+            clearRect: () => {
+                const len = Math.max(1, this.width) * Math.max(1, this.height) * 4;
+                if (this._pixels.length !== len) this._pixels = new Uint8ClampedArray(len);
+                else this._pixels.fill(0);
+            },
+            fillRect: (x, y, w, h) => {
+                const len = Math.max(1, this.width) * Math.max(1, this.height) * 4;
+                if (this._pixels.length !== len) this._pixels = new Uint8ClampedArray(len);
+                const x0 = Math.max(0, Math.floor(x));
+                const y0 = Math.max(0, Math.floor(y));
+                const x1 = Math.min(this.width, Math.ceil(x + w));
+                const y1 = Math.min(this.height, Math.ceil(y + h));
+                const isClear = this.ctx.globalCompositeOperation === "destination-out";
+                for (let py = y0; py < y1; py += 1) {
+                    for (let px = x0; px < x1; px += 1) {
+                        const p = (py * this.width + px) * 4;
+                        if (isClear) {
+                            this._pixels[p] = 0; this._pixels[p + 1] = 0; this._pixels[p + 2] = 0; this._pixels[p + 3] = 0;
+                        } else {
+                            this._pixels[p] = 255; this._pixels[p + 1] = 255; this._pixels[p + 2] = 255; this._pixels[p + 3] = 255;
+                        }
+                    }
+                }
+            },
+            drawImage: (img, dx = 0, dy = 0, dw = this.width, dh = this.height) => {
+                this.drawCalls.push(img);
+                const len = Math.max(1, this.width) * Math.max(1, this.height) * 4;
+                if (this._pixels.length !== len) this._pixels = new Uint8ClampedArray(len);
+                const srcPixels = img?._pixels || img?.rgba;
+                if (!srcPixels || !img.naturalWidth || !img.naturalHeight) return;
+                const sw = img.naturalWidth;
+                const sh = img.naturalHeight;
+                for (let py = 0; py < Math.min(this.height, Math.round(dh)); py += 1) {
+                    for (let px = 0; px < Math.min(this.width, Math.round(dw)); px += 1) {
+                        const tx = Math.round(dx) + px;
+                        const ty = Math.round(dy) + py;
+                        if (tx < 0 || ty < 0 || tx >= this.width || ty >= this.height) continue;
+                        const sx = Math.min(sw - 1, Math.floor((px / Math.max(1, dw)) * sw));
+                        const sy = Math.min(sh - 1, Math.floor((py / Math.max(1, dh)) * sh));
+                        const sp = (sy * sw + sx) * 4;
+                        const tp = (ty * this.width + tx) * 4;
+                        if (srcPixels[sp + 3] > 0) {
+                            this._pixels[tp] = srcPixels[sp];
+                            this._pixels[tp + 1] = srcPixels[sp + 1];
+                            this._pixels[tp + 2] = srcPixels[sp + 2];
+                            this._pixels[tp + 3] = srcPixels[sp + 3];
+                        }
+                    }
+                }
+            },
+            save() {},
+            restore() { this.globalCompositeOperation = "source-over"; this.globalAlpha = 1; },
+            beginPath() {},
+            rect() {},
+            arc: (x, y, r) => { this.arcCalls.push([x, y, r]); },
+            moveTo() {},
+            lineTo() {},
+            closePath() {},
+            fill() {},
+            stroke() {},
+            clip() {},
+            strokeRect() {},
+            setLineDash() {},
+            fillText() {},
+            getImageData: (_x, _y, w, h) => ({
+                width: w,
+                height: h,
+                data: new Uint8ClampedArray(this._pixels.subarray(0, w * h * 4)),
+            }),
+            putImageData: (imgData) => {
+                this._pixels.set(imgData.data.subarray(0, this._pixels.length));
+            },
+        };
+    }
+    getContext() { return this.ctx; }
+    getBoundingClientRect() { return { left: 0, top: 0, width: 40, height: 30 }; }
+}
+
+const savedCreateElement = globalThis.document.createElement;
+const pixelCanvases = [];
+globalThis.document.createElement = (tag) => {
+    if (String(tag).toLowerCase() === "canvas") {
+        const c = new PixelCanvas();
+        pixelCanvases.push(c);
+        return c;
+    }
+    return new FakeElement(tag);
+};
+try {
+    const pxSubmittedBefore = submitted.length;
+    const pxWidgets = [
+        { name: "mask_data", value: "{}", options: {} },
+        { name: "tracking_mode", value: "sam3" },
+        { name: "grow", value: 0 },
+        { name: "feather", value: 0 },
+        { name: "start_frame", value: 0 },
+        { name: "end_frame", value: -1 },
+    ];
+    const pxNode = { id: 33, widgets: pxWidgets, properties: {}, graph: { setDirtyCanvas() {} }, addDOMWidget(_n, _t, root) { this.root = root; } };
+    const pxEditor = createUniversalMaskEditor(pxNode, { app, api });
+    const mainCanvas = pixelCanvases[0];
+    const maskCanvas = pixelCanvases[1];
+
+    const W = 40;
+    const H = 30;
+    const makeRgbaRect = (x0, y0, x1, y1) => {
+        const rgba = new Uint8ClampedArray(W * H * 4);
+        for (let y = y0; y < y1; y += 1) {
+            for (let x = x0; x < x1; x += 1) {
+                const p = (y * W + x) * 4;
+                rgba[p] = 255; rgba[p + 1] = 255; rgba[p + 2] = 255; rgba[p + 3] = 255;
+            }
+        }
+        return { naturalWidth: W, naturalHeight: H, rgba };
+    };
+    const srcImg = makeRgbaRect(0, 0, W, H);
+    const l1Img = makeRgbaRect(2, 2, 18, 18); // x=[2..18), y=[2..18)
+    const l2Img = makeRgbaRect(10, 10, 26, 26); // overlaps l1 at [10..18)x[10..18)
+    const unionImg = makeRgbaRect(2, 2, 18, 18);
+
+    const pxSource = { frames: 2, width: W, height: H, fingerprint: "px-1" };
+    pxEditor.state.source = pxSource;
+    pxEditor.state.frameCount = 2;
+    pxEditor.document.source = pxSource;
+    pxEditor.state.sam3.frame = 0;
+    pxEditor.document.sam3 = { action: "track", frame: 0, direction: "both", seed_token: "tok-px", prompt: { frame: 0, points: [[0.25, 0.25]], labels: [1] } };
+    pxEditor.state.sam3.seedToken = "tok-px";
+    pxEditor.state.sam3.frameReady = true;
+    pxEditor.state.sam3.trackReady = true;
+    pxEditor.state.sam3.sourceKey = "2|40|30|px-1";
+    pxEditor.state.sam3.frameSignature = JSON.stringify({ source: "2|40|30|px-1", seed: "tok-px", frame: 0, edits: JSON.stringify({ source: "2|40|30|px-1", objects: [{ frame: 0, points: [[0.25, 0.25]], labels: [1] }], legacyBoxes: {} }) });
+    pxEditor.state.sam3.trackSignature = JSON.stringify({ source: "2|40|30|px-1", seed: "tok-px", frame: 0, edits: JSON.stringify({ source: "2|40|30|px-1", objects: [{ frame: 0, points: [[0.25, 0.25]], labels: [1] }], legacyBoxes: {} }), direction: "both", start: 0, end: -1 });
+    pxEditor.commit();
+    pxEditor.state.frameItems.set(0, { sourceImage: srcImg, maskImage: unionImg, rawMaskImage: l1Img, editBaseImage: l1Img });
+    pxEditor.state.previews.set(0, pxEditor.state.frameItems.get(0));
+    pxEditor.setFrame(0, { load: false });
+
+    // 3a) "Трекинг слоя" label hidden in SAM3 mode; visible with SAM3 option disabled in Flow mode.
+    const pxModeSelect = find(pxEditor.root, (el) => el.tagName === "SELECT" && el.attributes["aria-label"] === "Трекинг");
+    const pxModeLabel = pxModeSelect.parentNode;
+    assert.equal(pxModeLabel.hidden, true, "tracking mode dropdown is hidden on SAM3 layers");
+    assert.equal(pxModeLabel.style.display, "none");
+
+    // 3b) Base layer blend button disabled when blend === "add".
+    const firstRowBlend = findButton(findAll(pxEditor.root, (el) => String(el.className || "").includes("ths-layer-item"))[0], "Режим смешивания слоя");
+    assert.equal(firstRowBlend.disabled, true, "first layer '+' blend cannot cycle into empty intersect");
+
+    // 3c) Toggle single SAM3 layer visibility off -> clears mask and SAM3 point markers immediately with no preview request.
+    findButton(pxEditor.root, "Маска").click();
+    assert.ok(mainCanvas.arcCalls.length > 0, "SAM3 point marker visible initially");
+    assert.equal(maskCanvas._pixels[(5 * W + 5) * 4], 255, "SAM3 mask visible initially");
+
+    const singleVisBtn = findButton(pxEditor.root, "Видимость слоя");
+    mainCanvas.arcCalls.length = 0;
+    singleVisBtn.click();
+    assert.equal(submitted.length, pxSubmittedBefore, "toggling visibility never sends a server preview request");
+    assert.equal(mainCanvas.arcCalls.length, 0, "hidden SAM3 layer hides point markers immediately");
+    assert.equal(maskCanvas._pixels[(5 * W + 5) * 4], 0, "hidden single SAM3 layer clears mask canvas immediately");
+
+    // Re-enable -> restores mask and SAM3 markers immediately.
+    findButton(pxEditor.root, "Видимость слоя").click();
+    assert.ok(mainCanvas.arcCalls.length > 0, "re-enabled SAM3 layer restores point markers");
+    assert.equal(maskCanvas._pixels[(5 * W + 5) * 4], 255, "re-enabled SAM3 layer restores mask immediately");
+
+    // 3d) Multi-layer live pixel compositing: add Layer 2 (Optical Flow), provide per-layer server masks, verify 👁, −, and ∩.
+    findButton(pxEditor.root, "+ Flow").click();
+    assert.equal(pxModeLabel.hidden, false, "Трекинг слоя dropdown visible on Optical Flow layer");
+    const samOption = find(pxModeSelect, (el) => el.tagName === "OPTION" && el.value === "sam3");
+    assert.equal(samOption.hidden, true);
+    assert.equal(samOption.disabled, true);
+
+    const l1Id = pxEditor.document.layers[0].id;
+    const l2Id = pxEditor.document.layers[1].id;
+    pxEditor.document.layers[1].frames = { "0": { events: [{ type: "rect", mode: "add", x: 0.25, y: 0.33, w: 0.4, h: 0.5 }] } };
+    pxEditor.commit();
+    await pxEditor.applyExecuted({
+        universal_mask_meta: [{
+            source: pxSource,
+            has_mask: true,
+            has_per_layer_masks: true,
+            active_layer_id: l2Id,
+            layers: [
+                { id: l1Id, type: "sam3", blend: "add", enabled: true, has_mask: true, sam3: { frame_ready: true, track_ready: true, frame: 0, seed_token: "tok-px" } },
+                { id: l2Id, type: "optical_flow", blend: "add", enabled: true, has_mask: true },
+            ],
+        }],
+        universal_mask_frames: [{ frame: 0 }],
+    });
+    const layerMaskMap = new Map([[l1Id, l1Img], [l2Id, l2Img]]);
+    pxEditor.state.frameItems.set(0, { sourceImage: srcImg, maskImage: unionImg, has_layer_masks: true, layerMaskImages: layerMaskMap });
+    pxEditor.state.previews.set(0, pxEditor.state.frameItems.get(0));
+    pxEditor.setFrame(0, { load: false });
+
+    // Both layers enabled (add): (5,5) in l1 only -> 255, (20,20) in l2 only -> 255, (12,12) in both -> 255.
+    assert.equal(maskCanvas._pixels[(5 * W + 5) * 4], 255);
+    assert.equal(maskCanvas._pixels[(20 * W + 20) * 4], 255);
+    assert.equal(maskCanvas._pixels[(12 * W + 12) * 4], 255);
+
+    // Hide Layer 1 (👁 -> ○): (5,5) becomes 0 while (20,20) and (12,12) stay 255!
+    const l1Vis = findButton(findAll(pxEditor.root, (el) => String(el.className || "").includes("ths-layer-item"))[0], "Видимость слоя");
+    l1Vis.click();
+    assert.equal(maskCanvas._pixels[(5 * W + 5) * 4], 0, "hiding Layer 1 clears Layer 1 pixels immediately");
+    assert.equal(maskCanvas._pixels[(20 * W + 20) * 4], 255, "Layer 2 pixels remain visible when Layer 1 hidden");
+
+    // Re-enable Layer 1, then cycle Layer 2 blend -> subtract ("−"): (12,12) becomes 0, (5,5) stays 255!
+    findButton(findAll(pxEditor.root, (el) => String(el.className || "").includes("ths-layer-item"))[0], "Видимость слоя").click();
+    const l2Blend = findButton(findAll(pxEditor.root, (el) => String(el.className || "").includes("ths-layer-item"))[1], "Режим смешивания слоя");
+    l2Blend.click(); // add -> subtract
+    assert.equal(maskCanvas._pixels[(5 * W + 5) * 4], 255);
+    assert.equal(maskCanvas._pixels[(12 * W + 12) * 4], 0, "subtract blend carves Layer 2 out of Layer 1 live");
+    assert.equal(maskCanvas._pixels[(20 * W + 20) * 4], 0);
+
+    // Cycle Layer 2 blend -> intersect ("∩"): only (12,12) stays 255!
+    findButton(findAll(pxEditor.root, (el) => String(el.className || "").includes("ths-layer-item"))[1], "Режим смешивания слоя").click();
+    assert.equal(maskCanvas._pixels[(5 * W + 5) * 4], 0, "intersect clears Layer 1-only pixels live");
+    assert.equal(maskCanvas._pixels[(12 * W + 12) * 4], 255, "intersect keeps overlap pixels live");
+    assert.equal(maskCanvas._pixels[(20 * W + 20) * 4], 0, "intersect clears Layer 2-only pixels live");
+
+    pxEditor.destroy();
+} finally {
+    globalThis.document.createElement = savedCreateElement;
+}
+
 console.log("mask_layers: PASS");

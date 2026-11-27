@@ -672,8 +672,44 @@ def test_node_multilayer_meta_frame_preview_and_smart_blocker(monkeypatch):
     )
     patch_res = THSUniversalMaskEditor().run(source, patch_doc, tracking_mode="sam3", grow=0, feather=0)
     assert "universal_mask_frame_patch" in patch_res["ui"]
+    patch_obj = patch_res["ui"]["universal_mask_frame_patch"][0]
+    assert patch_obj["has_layer_masks"] is True
+    assert set(patch_obj["layer_masks"].keys()) == {"l-sam3", "l-static"}
     patch_meta = patch_res["ui"]["universal_mask_meta"][0]
     assert len(patch_meta["layers"]) == 2
     assert patch_meta["layers"][0]["has_mask"] is True and patch_meta["layers"][1]["has_mask"] is True
+    assert patch_meta["has_per_layer_masks"] is True
     # Interactive SAM3 frame preview stops downstream execution cleanly.
     assert all(isinstance(item, _ExecutionBlocker) for item in patch_res["result"])
+
+    # 4) Disabled active SAM3 layer skips calculate_frame during frame preview while preserving other enabled layers.
+    predict_calls = []
+    monkeypatch.setattr(sam3_video, "_predict_native", lambda image, event, **_kw: (predict_calls.append(1), fake_predict(image, event))[1])
+    disabled_active_patch_doc = json.dumps(
+        {
+            "editor_request": "sam3_frame_v1",
+            "layers": [
+                {
+                    "id": "l-sam3",
+                    "type": "sam3",
+                    "blend": "add",
+                    "enabled": False,
+                    "sam3": {"action": "frame", "frame": 0, "direction": "both", "prompt": {"frame": 0, "points": [[0.2, 0.2]], "labels": [1]}},
+                    "frames": {},
+                },
+                {
+                    "id": "l-static",
+                    "type": "static",
+                    "blend": "add",
+                    "enabled": True,
+                    "frames": {"0": {"events": [{"type": "rect", "mode": "add", "x": 0.6, "y": 0.6, "w": 0.25, "h": 0.25}]}},
+                },
+            ],
+            "active_layer_id": "l-sam3",
+        }
+    )
+    disabled_patch_res = THSUniversalMaskEditor().run(source, disabled_active_patch_doc, tracking_mode="sam3", grow=0, feather=0)
+    assert len(predict_calls) == 0, "disabled active SAM3 layer must not run SAM3 frame inference"
+    disabled_patch_obj = disabled_patch_res["ui"]["universal_mask_frame_patch"][0]
+    assert disabled_patch_obj["has_layer_masks"] is True
+    assert set(disabled_patch_obj["layer_masks"].keys()) == {"l-static"}

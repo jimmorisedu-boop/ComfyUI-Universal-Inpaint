@@ -179,12 +179,12 @@ def test_raw_track_cache_survives_grow_feather_and_local_brush_edits(monkeypatch
         return_edit_bases=True, return_sam3_meta=True,
     )
     calls = []
+    seen_seed_masks = []
 
     def fake_track(images, prompts, *, seed, start, end, direction):
         calls.append(1)
-        base = np.zeros(images.shape[1:3], dtype=bool)
-        base[4:12, 6:15] = True
-        return {frame: base.copy() for frame in range(start, end + 1)}
+        seen_seed_masks.append(np.asarray(seed.mask, dtype=bool).copy())
+        return {frame: np.asarray(seed.mask, dtype=bool).copy() for frame in range(start, end + 1)}
 
     monkeypatch.setattr(video, "_native_track", fake_track)
     first_doc = _doc(action="track", token=frame_meta["seed_token"])
@@ -192,13 +192,27 @@ def test_raw_track_cache_survives_grow_feather_and_local_brush_edits(monkeypatch
         images, first_doc, tracking_mode="sam3", grow=0, feather=0,
         return_edit_bases=True, return_sam3_meta=True,
     )
-    second_doc = _doc(action="track", token=frame_meta["seed_token"], local=True)
-    second, _p, _a, _b, _m = core.build_mask_sequence(
-        images, second_doc, tracking_mode="sam3", grow=3, feather=2,
+    # Changing only grow/feather hits the raw SAM3 track cache without re-running native tracking.
+    grown, _p, _a, _b, grown_meta = core.build_mask_sequence(
+        images, first_doc, tracking_mode="sam3", grow=3, feather=2,
         return_edit_bases=True, return_sam3_meta=True,
     )
     assert len(calls) == 1
-    assert np.any(first != second)
+    assert grown_meta.get("cache_hit") is True
+    assert np.any(first != grown)
+
+    # Adding a brush/erase edit on the seed frame invalidates the raw cache, propagates via seed.mask,
+    # and preserves the unedited pre-overlay edit baseline on the seed frame.
+    second_doc = _doc(action="track", token=frame_meta["seed_token"], local=True)
+    second, _p, _a, second_bases, second_meta = core.build_mask_sequence(
+        images, second_doc, tracking_mode="sam3", grow=0, feather=0,
+        return_edit_bases=True, return_sam3_meta=True,
+    )
+    assert len(calls) == 2
+    assert second_meta.get("cache_hit") is False
+    assert not bool(seen_seed_masks[-1][5, 7]), "erased spot removed before native tracking"
+    assert not bool(second[3, 5, 7]), "erased spot propagated to subsequent tracked frames"
+    assert bool(second_bases[1, 5, 7]), "pre-overlay edit baseline stays intact on seed frame"
 
 
 def test_track_rejects_lost_object_identity_and_missing_requested_frames(monkeypatch):
@@ -567,5 +581,153 @@ def test_predict_native_ranks_candidate_excluding_negative_points_above_higher_s
     selected = sam3_mod._predict_native(image, event, mask_input=(face > 0.5))
     assert seen["mask_input_shape"] == (1, 16, 16)
     assert bool(selected[5, 18]) and not bool(selected[15, 5])
+
+
+def test_sam3_track_propagates_seed_and_non_seed_brush_edits_via_add_new_mask(monkeypatch):
+    import types
+
+    images = _clip(frames=4, height=20, width=30)
+    face = np.zeros((20, 30), dtype=bool)
+    face[2:10, 12:24] = True
+    video.clear_sam3_video_cache()
+    monkeypatch.setattr(video, "_predict_native", lambda img, ev, **kw: face.copy())
+
+    events_log = []
+    latest_masks = {}
+
+    class FakeTracker:
+        def add_new_mask(self, *, inference_state, frame_idx, obj_id, mask):
+            m = np.asarray(mask.detach().cpu().numpy() if hasattr(mask, "detach") else mask) > 0.5
+            latest_masks[(int(obj_id), int(frame_idx))] = m.copy()
+            events_log.append(("add_new_mask", int(obj_id), int(frame_idx), m.copy()))
+
+        def propagate_in_video_preflight(self, state, run_mem_encoder=True):
+            events_log.append(("preflight", bool(run_mem_encoder)))
+
+    class FakeModel:
+        def __init__(self):
+            self.model = types.SimpleNamespace(
+                tracker=FakeTracker(),
+                _get_tracker_inference_states_by_obj_ids=lambda st, ids: [{"obj_id": ids[0]}],
+                _prepare_backbone_feats=lambda st, f, rev: events_log.append(("prepare_feats", int(f))),
+            )
+
+        def handle_stream_request(self, request):
+            events_log.append(("propagate", request["propagation_direction"], int(request["start_frame_index"])))
+            # Propagate the latest conditioned mask across frames so tests verify propagation.
+            propagated = np.zeros((20, 30), dtype=bool)
+            for (_oid, _f), m in latest_masks.items():
+                propagated |= m
+            for idx in range(4):
+                yield {"frame_index": idx, "outputs": {"obj_ids": np.array([1]), "out_binary_masks": propagated[None, ...]}}
+
+    fake_video_state = types.SimpleNamespace(
+        num_frames=4,
+        prompts=[1],
+        session_uuid="sess-brush",
+        temp_dir=None,
+        with_prompt=lambda p: fake_video_state,
+    )
+    fake_vmod = types.SimpleNamespace(
+        create_video_state=lambda video_frames, config: fake_video_state,
+        cleanup_temp_dir=lambda d: None,
+    )
+    fake_reconstructor = types.SimpleNamespace(
+        get_inference_state=lambda m, vs: {"tracker_inference_states": [{}]},
+    )
+    fake_prompt_cls = types.SimpleNamespace(
+        create_point=lambda f, oid, pts, lbls: (f, oid),
+        create_box=lambda f, oid, box, is_positive=True: (f, oid),
+    )
+    fake_cache = types.SimpleNamespace(get_or_build_model=lambda cfg: FakeModel())
+    monkeypatch.setattr(video, "_native_video_modules", lambda: (fake_vmod, fake_reconstructor, fake_prompt_cls, lambda: {}))
+    monkeypatch.setattr(video, "_native_model_cache_module", lambda: fake_cache)
+    monkeypatch.setattr(video, "_native_config", lambda: {})
+    monkeypatch.setattr(video, "_offload_model", lambda m: None)
+    monkeypatch.setitem(sys.modules, "comfy", types.SimpleNamespace(model_management=types.SimpleNamespace(load_models_gpu=lambda models: None)))
+    monkeypatch.setitem(sys.modules, "comfy.model_management", sys.modules["comfy"].model_management)
+
+    # 1) Seed frame brush add + erase on frame 0 propagates to all frames, keeping unedited edit_bases[0].
+    base_doc = {
+        "tracking_mode": "sam3",
+        "sam3": {
+            "action": "frame",
+            "frame": 0,
+            "direction": "both",
+            "prompt": {"frame": 0, "points": [[0.6, 0.3]], "labels": [1]},
+        },
+        "frames": {},
+    }
+    _m0, _p0, _a0, _eb0, meta0 = core.build_mask_sequence(
+        images, base_doc, tracking_mode="sam3", grow=0, feather=0, return_edit_bases=True, return_sam3_meta=True
+    )
+    token = meta0["seed_token"]
+
+    doc_seed_brush = {
+        "tracking_mode": "sam3",
+        "sam3": {**base_doc["sam3"], "action": "track", "seed_token": token},
+        "frames": {
+            "0": {
+                "inherit": True,
+                "events": [
+                    {"type": "rect", "mode": "add", "x": 0.05, "y": 0.6, "w": 0.25, "h": 0.25},
+                    {"type": "stroke", "mode": "erase", "radius": 0.1, "points": [[0.6, 0.3]]},
+                ],
+            }
+        },
+    }
+    res1, _p1, _a1, eb1, _meta1 = core.build_mask_sequence(
+        images, doc_seed_brush, tracking_mode="sam3", grow=0, feather=0, return_edit_bases=True, return_sam3_meta=True
+    )
+    seed_masks_sent = [ev[3] for ev in events_log if ev[0] == "add_new_mask" and ev[2] == 0]
+    assert len(seed_masks_sent) == 1
+    assert bool(seed_masks_sent[0][14, 4]), "seed-frame brush add included in add_new_mask(frame=0)"
+    assert not bool(seed_masks_sent[0][5, 18]), "seed-frame eraser excluded from add_new_mask(frame=0)"
+    assert bool(res1[3, 14, 4]), "brush add on frame 0 propagated to frame 3"
+    assert not bool(res1[3, 5, 18]), "eraser on frame 0 propagated to frame 3"
+    assert bool(eb1[0, 5, 18]) and not bool(eb1[0, 14, 4]), "edit_bases[0] preserves pre-overlay SAM3 seed"
+
+    # 2) Non-seed frame 2 brush add with warm prior cache calls add_new_mask(frame=2) directly without warmup.
+    events_log.clear()
+    latest_masks.clear()
+    doc_warm_non_seed = {
+        "tracking_mode": "sam3",
+        "sam3": {**base_doc["sam3"], "action": "track", "seed_token": token},
+        "frames": {
+            "2": {
+                "inherit": True,
+                "events": [
+                    {"type": "rect", "mode": "add", "x": 0.70, "y": 0.65, "w": 0.2, "h": 0.2},
+                ],
+            }
+        },
+    }
+    res2, _p2, _a2, eb2, _meta2 = core.build_mask_sequence(
+        images, doc_warm_non_seed, tracking_mode="sam3", grow=0, feather=0, return_edit_bases=True, return_sam3_meta=True
+    )
+    add2 = [i for i, ev in enumerate(events_log) if ev[0] == "add_new_mask" and ev[2] == 2]
+    props2 = [i for i, ev in enumerate(events_log) if ev[0] == "propagate"]
+    assert len(add2) == 1 and add2[0] < props2[0], f"warm cache conditions frame 2 before propagate: {events_log}"
+    assert bool(events_log[add2[0]][3][15, 23]), "non-seed brush add included on frame 2"
+    assert bool(res2[3, 15, 23]), "non-seed brush propagated to neighbor frame 3"
+    assert not bool(eb2[2, 15, 23]), "edit_bases[2] preserves pre-overlay baseline on frame 2"
+
+    # 3) Non-seed frame 2 brush add with cold _OBJECT_TRACK_CACHE runs warmup -> add_new_mask(frame=2) -> final propagate.
+    with video._CACHE_LOCK:
+        video._OBJECT_TRACK_CACHE.clear()
+        video._RAW_CACHE.clear()
+        video._RAW_BASE_OVERRIDES.clear()
+    events_log.clear()
+    latest_masks.clear()
+    res3, _p3, _a3, eb3, _meta3 = core.build_mask_sequence(
+        images, doc_warm_non_seed, tracking_mode="sam3", grow=0, feather=0, return_edit_bases=True, return_sam3_meta=True
+    )
+    first_prop = next(i for i, ev in enumerate(events_log) if ev[0] == "propagate")
+    add2_cold = next(i for i, ev in enumerate(events_log) if ev[0] == "add_new_mask" and ev[2] == 2)
+    last_prop = max(i for i, ev in enumerate(events_log) if ev[0] == "propagate")
+    assert first_prop < add2_cold < last_prop, f"cold cache runs warmup -> add_new_mask(2) -> final propagate: {events_log}"
+    assert bool(events_log[add2_cold][3][15, 23]) and bool(events_log[add2_cold][3][5, 18])
+    assert bool(res3[3, 15, 23])
+    assert bool(eb3[2, 5, 18]) and not bool(eb3[2, 15, 23])
 
 

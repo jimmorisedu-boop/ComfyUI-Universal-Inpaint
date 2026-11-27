@@ -16,6 +16,7 @@ import gc
 import hashlib
 import importlib
 import inspect
+import json
 import logging
 import threading
 import uuid
@@ -79,6 +80,7 @@ MAX_RAW_CACHE_ITEM_BYTES = 128 * 1024 * 1024
 MAX_OBJECT_TRACK_CACHE_BYTES = 128 * 1024 * 1024
 _SEED_CACHE: "OrderedDict[str, SAM3Seed]" = OrderedDict()
 _RAW_CACHE: "OrderedDict[tuple[Any, ...], tuple[bytes, tuple[int, ...], frozenset[int], dict[str, Any], int]]" = OrderedDict()
+_RAW_BASE_OVERRIDES: "dict[tuple[Any, ...], dict[int, tuple[bytes, tuple[int, ...]]]]" = {}
 _OBJECT_TRACK_CACHE: "OrderedDict[tuple[str, int], tuple[bytes, tuple[int, ...], int]]" = OrderedDict()
 _CACHE_LOCK = threading.RLock()
 _VIDEO_INFERENCE_LOCK = threading.RLock()
@@ -98,6 +100,7 @@ def clear_sam3_video_cache() -> None:
     with _CACHE_LOCK:
         _SEED_CACHE.clear()
         _RAW_CACHE.clear()
+        _RAW_BASE_OVERRIDES.clear()
         _OBJECT_TRACK_CACHE.clear()
         _REF_MASK_CACHE.clear()
         _RAW_CACHE_BYTES = 0
@@ -318,6 +321,172 @@ def _overlay_events(parsed: Mapping[str, Any], frame: int) -> list[dict[str, Any
                 continue
         result.append(dict(event))
     return result
+
+
+def _collect_frame_overlays(
+    parsed: Mapping[str, Any],
+    start: int,
+    end: int,
+) -> dict[int, list[dict[str, Any]]]:
+    overlays: dict[int, list[dict[str, Any]]] = {}
+    for frame_idx in range(int(start), int(end) + 1):
+        events = _overlay_events(parsed, frame_idx)
+        if events:
+            overlays[int(frame_idx)] = events
+    return overlays
+
+
+def _overlay_digest(frame_overlays: Mapping[int, list[dict[str, Any]]]) -> str:
+    if not frame_overlays:
+        return ""
+    items = [[int(frame_idx), frame_overlays[frame_idx]] for frame_idx in sorted(frame_overlays)]
+    encoded = json.dumps(items, sort_keys=True, ensure_ascii=True, separators=(",", ":"), default=repr)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:32]
+
+
+def _choose_overlay_target_object(obj_masks: Mapping[int, np.ndarray], delta: np.ndarray) -> int:
+    oids = sorted(int(oid) for oid in obj_masks)
+    best_oid: int | None = None
+    best_overlap = 0
+    for oid in oids:
+        overlap = int(np.count_nonzero((np.asarray(obj_masks[oid]) > 0.5) & delta))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_oid = oid
+    if best_oid is not None:
+        return best_oid
+    delta_ys, delta_xs = np.nonzero(delta)
+    if len(delta_ys):
+        dy = float(np.mean(delta_ys))
+        dx = float(np.mean(delta_xs))
+        nearest_oid: int | None = None
+        nearest_dist = float("inf")
+        for oid in oids:
+            ys, xs = np.nonzero(np.asarray(obj_masks[oid]) > 0.5)
+            if not len(ys):
+                continue
+            dist = (float(np.mean(ys)) - dy) ** 2 + (float(np.mean(xs)) - dx) ** 2
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest_oid = oid
+        if nearest_oid is not None:
+            return nearest_oid
+    return oids[0]
+
+
+def _apply_overlay_events_to_object_masks(
+    obj_masks: Mapping[int, np.ndarray],
+    events: list[dict[str, Any]],
+    image: np.ndarray,
+) -> dict[int, np.ndarray]:
+    if not obj_masks or not events:
+        return {int(oid): np.asarray(mask > 0.5, dtype=bool).copy() for oid, mask in obj_masks.items()}
+    from .mask_core import rasterize_events
+
+    height, width = map(int, image.shape[:2])
+    updated: dict[int, np.ndarray] = {
+        int(oid): np.asarray(mask, dtype=np.float32).copy()
+        for oid, mask in obj_masks.items()
+    }
+    oids = sorted(updated)
+    for event in events:
+        mode = str(event.get("mode", "add"))
+        if mode == "erase":
+            for oid in oids:
+                updated[oid] = rasterize_events([event], height, width, image, updated[oid])
+        elif len(oids) == 1:
+            only_oid = oids[0]
+            updated[only_oid] = rasterize_events([event], height, width, image, updated[only_oid])
+        else:
+            delta = rasterize_events([event], height, width, image, np.zeros((height, width), dtype=np.float32)) > 0.5
+            if bool(delta.any()):
+                target_oid = _choose_overlay_target_object(updated, delta)
+                updated[target_oid] = np.maximum(updated[target_oid], delta.astype(np.float32))
+    return {oid: np.asarray(mask > 0.5, dtype=bool) for oid, mask in updated.items()}
+
+
+def _build_effective_seed(
+    seed: SAM3Seed,
+    images: np.ndarray,
+    frame_overlays: Mapping[int, list[dict[str, Any]]],
+) -> tuple[SAM3Seed, dict[int, np.ndarray], set[int]]:
+    if not frame_overlays:
+        return seed, {}, set()
+
+    objects_list = [(key, np.asarray(obj_mask, dtype=bool).copy()) for key, obj_mask in seed.objects]
+    obj_frames = [
+        int(seed.object_frames[idx]) if idx < len(seed.object_frames) else int(seed.frame)
+        for idx in range(len(objects_list))
+    ]
+    ref_list = [
+        (int(oid), int(rf), np.asarray(rm, dtype=bool).copy())
+        for oid, rf, rm in getattr(seed, "refinement_masks", ())
+    ]
+    effective_mask = np.asarray(seed.mask, dtype=bool).copy()
+    pre_overlay_seed_frames: dict[int, np.ndarray] = {}
+    handled_frames: set[int] = set()
+    num_frames = int(images.shape[0])
+
+    if objects_list or ref_list:
+        seed_frames_present = {f for f in obj_frames if 0 <= f < num_frames}
+        seed_frames_present.update(rf for _oid, rf, _rm in ref_list if 0 <= rf < num_frames)
+        for f in sorted(seed_frames_present):
+            if f not in frame_overlays:
+                continue
+            obj_indices = [idx for idx, obj_f in enumerate(obj_frames) if obj_f == f]
+            ref_indices = [r_idx for r_idx, (_oid, rf, _rm) in enumerate(ref_list) if rf == f]
+            masks_on_f: dict[int, np.ndarray] = {}
+            for idx in obj_indices:
+                masks_on_f[idx + 1] = objects_list[idx][1]
+            for r_idx in ref_indices:
+                r_oid, _rf, r_mask = ref_list[r_idx]
+                masks_on_f[r_oid] = r_mask
+            if not masks_on_f:
+                continue
+            if f == int(seed.frame):
+                pre_overlay_seed_frames[f] = np.asarray(seed.mask, dtype=bool).copy()
+            else:
+                union_before = np.zeros(images.shape[1:3], dtype=bool)
+                for m in masks_on_f.values():
+                    np.logical_or(union_before, m, out=union_before)
+                pre_overlay_seed_frames[f] = union_before
+            edited = _apply_overlay_events_to_object_masks(masks_on_f, frame_overlays[f], images[f])
+            for idx in obj_indices:
+                objects_list[idx] = (objects_list[idx][0], edited[idx + 1])
+            for r_idx in ref_indices:
+                r_oid, rf, _r_mask = ref_list[r_idx]
+                ref_list[r_idx] = (r_oid, rf, edited[r_oid])
+            if f == int(seed.frame):
+                effective_mask = _apply_overlay_events_to_object_masks(
+                    {0: effective_mask}, frame_overlays[f], images[f]
+                )[0]
+            handled_frames.add(f)
+    elif int(seed.frame) in frame_overlays and 0 <= int(seed.frame) < num_frames:
+        f = int(seed.frame)
+        pre_overlay_seed_frames[f] = effective_mask.copy()
+        edited = _apply_overlay_events_to_object_masks(
+            {int(seed.object_id): effective_mask}, frame_overlays[f], images[f]
+        )
+        effective_mask = edited[int(seed.object_id)]
+        handled_frames.add(f)
+
+    if not handled_frames:
+        return seed, {}, set()
+
+    effective_seed = SAM3Seed(
+        token=seed.token,
+        source_digest=seed.source_digest,
+        source_shape=seed.source_shape,
+        frame=seed.frame,
+        prompt_digest=seed.prompt_digest,
+        box=seed.box,
+        mask=effective_mask,
+        object_id=seed.object_id,
+        objects=tuple(objects_list),
+        object_frames=seed.object_frames,
+        refinement_masks=tuple(ref_list),
+    )
+    return effective_seed, pre_overlay_seed_frames, handled_frames
 
 
 def _require_range(images: np.ndarray, seed: SAM3Seed, start: int, end: int) -> tuple[int, int]:
@@ -882,6 +1051,8 @@ def _native_track(
     end: int,
     direction: str,
     object_masks_out: dict[int, dict[int, np.ndarray]] | None = None,
+    frame_overlays: Mapping[int, list[dict[str, Any]]] | None = None,
+    pre_overlay_bases_out: dict[int, np.ndarray] | None = None,
 ) -> dict[int, np.ndarray]:
     """Propagate selected objects independently and union them per frame."""
 
@@ -970,12 +1141,17 @@ def _native_track(
                 )
                 for index, (_, object_mask) in enumerate(seed.objects, start=1)
             ] or [(seed.object_id, int(seed.frame), seed.mask)]
+            object_ids = [object_id for object_id, _, _ in seeds]
+            shape = tuple(int(v) for v in images.shape[1:3])
+            has_any_overlay = bool(frame_overlays)
             updated_states = {}
             for object_id, obj_frame, object_mask in seeds:
                 tracker_states = state_lookup(inference_state, [object_id])
                 if not tracker_states:
                     raise SAM3VideoError(f"SAM3 native tracker did not create selected object {object_id}")
                 tracker_state = tracker_states[0]
+                if not bool(np.asarray(object_mask).any()) and (len(seeds) > 1 or has_any_overlay):
+                    continue
                 add_new_mask(
                     inference_state=tracker_state,
                     frame_idx=int(obj_frame),
@@ -1001,6 +1177,40 @@ def _native_track(
                         mask_refs.append((object_id, r_frame, r_mask))
                     else:
                         point_refs.append((object_id, r_frame, ref))
+            cold_overlay_frames: list[int] = []
+            warm_overlay_frames: list[int] = []
+            for o_frame, o_events in sorted((frame_overlays or {}).items()):
+                o_frame_i = int(o_frame)
+                if not (int(start) <= o_frame_i <= int(end)) or not o_events:
+                    continue
+                prior_map: dict[int, np.ndarray] = {}
+                for oid in object_ids:
+                    prior_m = _lookup_prior_frame_mask(
+                        seed.source_digest,
+                        oid,
+                        o_frame_i,
+                        shape,
+                        allow_combined_fallback=(len(seeds) == 1),
+                    )
+                    if prior_m is not None:
+                        prior_map[oid] = prior_m
+                if prior_map:
+                    full_prior = {
+                        oid: prior_map.get(oid, np.zeros(shape, dtype=bool))
+                        for oid in object_ids
+                    }
+                    if pre_overlay_bases_out is not None:
+                        union_prior = np.zeros(shape, dtype=np.float32)
+                        for m in full_prior.values():
+                            np.maximum(union_prior, np.asarray(m, dtype=np.float32), out=union_prior)
+                        pre_overlay_bases_out[o_frame_i] = union_prior
+                    edited_map = _apply_overlay_events_to_object_masks(full_prior, o_events, images[o_frame_i])
+                    for oid in object_ids:
+                        if bool(edited_map[oid].any()) or bool(full_prior[oid].any()):
+                            mask_refs.append((oid, o_frame_i, edited_map[oid]))
+                    warm_overlay_frames.append(o_frame_i)
+                else:
+                    cold_overlay_frames.append(o_frame_i)
             for object_id, r_frame, r_mask in mask_refs:
                 if callable(prepare_feats):
                     prepare_feats(inference_state, r_frame, False)
@@ -1016,15 +1226,24 @@ def _native_track(
                 )
                 updated_states[id(tracker_state)] = tracker_state
             preflight = getattr(tracker, "propagate_in_video_preflight", None)
-            if callable(preflight):
+            if callable(preflight) and updated_states:
                 for tracker_state in updated_states.values():
                     preflight(tracker_state, run_mem_encoder=True)
 
             _LAST_NATIVE_SEED_STRATEGY = "native_tracker_add_new_mask"
-            prompt_frames = sorted({
+            warmup_frames = sorted({
                 f for f in (
                     [int(item.get("frame", seed.frame)) for item in prompts]
+                    + [rf for _oid, rf, _rm in mask_refs]
+                    + warm_overlay_frames
+                )
+                if int(start) <= f <= int(end)
+            }) or [int(seed.frame)]
+            prompt_frames = sorted({
+                f for f in (
+                    warmup_frames
                     + [int(ref["frame"]) for item in prompts for ref in item.get("refinements", [])]
+                    + cold_overlay_frames
                 )
                 if int(start) <= f <= int(end)
             }) or [int(seed.frame)]
@@ -1035,18 +1254,39 @@ def _native_track(
             if direction in {"backward", "both"}:
                 spans.append(("backward", max_f, max(0, max_f - int(start))))
 
-            if point_refs:
-                for request_direction, start_idx, span in spans:
-                    _throw_interrupted()
-                    warmup_request = {
-                        "type": "propagate_in_video",
-                        "session_id": video_state.session_uuid,
-                        "propagation_direction": request_direction,
-                        "start_frame_index": int(start_idx),
-                        "max_frame_num_to_track": int(span),
-                    }
-                    for _response in model.handle_stream_request(warmup_request):
+            if point_refs or cold_overlay_frames:
+                w_min_f, w_max_f = warmup_frames[0], warmup_frames[-1]
+                warmup_spans: list[tuple[str, int, int]] = []
+                if direction in {"forward", "both"}:
+                    warmup_spans.append(("forward", w_min_f, max(0, int(end) - w_min_f)))
+                if direction in {"backward", "both"}:
+                    warmup_spans.append(("backward", w_max_f, max(0, w_max_f - int(start))))
+                cold_overlay_set = set(cold_overlay_frames)
+                warmup_obj_masks: dict[int, dict[int, np.ndarray]] = {}
+                if updated_states:
+                    for request_direction, start_idx, span in warmup_spans:
                         _throw_interrupted()
+                        warmup_request = {
+                            "type": "propagate_in_video",
+                            "session_id": video_state.session_uuid,
+                            "propagation_direction": request_direction,
+                            "start_frame_index": int(start_idx),
+                            "max_frame_num_to_track": int(span),
+                        }
+                        for response in model.handle_stream_request(warmup_request):
+                            _throw_interrupted()
+                            if not cold_overlay_set:
+                                continue
+                            w_idx = response.get("frame_index", response.get("frame_idx"))
+                            if w_idx is None or int(w_idx) not in cold_overlay_set:
+                                continue
+                            w_outputs = response.get("outputs", response)
+                            if not isinstance(w_outputs, Mapping):
+                                continue
+                            for oid in object_ids:
+                                oid_m = _select_object_mask(w_outputs, oid, shape)
+                                if oid_m is not None:
+                                    warmup_obj_masks.setdefault(int(w_idx), {})[oid] = oid_m
                 add_new_points = getattr(tracker, "add_new_points", None)
                 refined_states = {}
                 for object_id, r_frame, ref in point_refs:
@@ -1056,7 +1296,7 @@ def _native_track(
                     if not tracker_states or not callable(add_new_points):
                         continue
                     tracker_state = tracker_states[0]
-                    add_new_points(
+                    pt_out = add_new_points(
                         inference_state=tracker_state,
                         frame_idx=r_frame,
                         obj_id=object_id,
@@ -1066,7 +1306,42 @@ def _native_track(
                         rel_coordinates=True,
                         use_prev_mem_frame=True,
                     )
+                    if isinstance(pt_out, tuple) and len(pt_out) >= 4 and pt_out[3] is not None and r_frame in cold_overlay_set:
+                        pt_m = _select_object_mask({"obj_ids": pt_out[1], "video_res_masks": pt_out[3]}, object_id, shape)
+                        if pt_m is not None:
+                            warmup_obj_masks.setdefault(int(r_frame), {})[object_id] = pt_m
                     refined_states[id(tracker_state)] = tracker_state
+                for c_frame in cold_overlay_frames:
+                    c_events = (frame_overlays or {}).get(c_frame) or []
+                    if not c_events:
+                        continue
+                    captured = warmup_obj_masks.get(c_frame, {})
+                    full_warmup = {
+                        oid: captured.get(oid, np.zeros(shape, dtype=bool))
+                        for oid in object_ids
+                    }
+                    if pre_overlay_bases_out is not None:
+                        union_warmup = np.zeros(shape, dtype=np.float32)
+                        for m in full_warmup.values():
+                            np.maximum(union_warmup, np.asarray(m, dtype=np.float32), out=union_warmup)
+                        pre_overlay_bases_out[c_frame] = union_warmup
+                    edited_map = _apply_overlay_events_to_object_masks(full_warmup, c_events, images[c_frame])
+                    if callable(prepare_feats):
+                        prepare_feats(inference_state, c_frame, False)
+                    for oid in object_ids:
+                        if not bool(edited_map[oid].any()) and not bool(full_warmup[oid].any()):
+                            continue
+                        tracker_states = state_lookup(inference_state, [oid])
+                        if not tracker_states:
+                            continue
+                        tracker_state = tracker_states[0]
+                        add_new_mask(
+                            inference_state=tracker_state,
+                            frame_idx=int(c_frame),
+                            obj_id=oid,
+                            mask=torch.from_numpy(np.asarray(edited_map[oid], dtype=np.float32)),
+                        )
+                        refined_states[id(tracker_state)] = tracker_state
                 if callable(preflight):
                     for tracker_state in refined_states.values():
                         preflight(tracker_state, run_mem_encoder=True)
@@ -1076,8 +1351,6 @@ def _native_track(
             report = frame_progress("sam3_track", progress_end - progress_start + 1)
             completed = set(prompt_frames)
             report(len(completed))
-            object_ids = [object_id for object_id, _, _ in seeds]
-            shape = tuple(int(v) for v in images.shape[1:3])
             for request_direction, start_idx, span in spans:
                 _throw_interrupted()
                 request = {
@@ -1135,6 +1408,34 @@ def _native_track(
         raise SAM3VideoError(f"SAM3 native video propagation failed: {type(exc).__name__}: {exc}") from exc
 
 
+def _restore_cached_video_result(
+    cache_key: tuple[Any, ...],
+    cached: tuple[bytes, tuple[int, ...], frozenset[int], dict[str, Any], int],
+    *,
+    start: int,
+    end: int,
+    pre_overlay_seed_frames: Mapping[int, np.ndarray],
+) -> SAM3VideoResult:
+    payload, shape, anchors, cached_meta, _item_bytes = cached
+    restored = _unpack_binary_mask(payload, shape)
+    meta = dict(cached_meta)
+    meta["cache_hit"] = True
+    meta.update(sam3_video_cache_info())
+    packed_overrides = _RAW_BASE_OVERRIDES.get(cache_key)
+    if pre_overlay_seed_frames or packed_overrides:
+        edit_bases = restored.copy()
+        if packed_overrides:
+            for f_idx, (ov_payload, ov_shape) in packed_overrides.items():
+                if start <= int(f_idx) <= end:
+                    edit_bases[int(f_idx)] = _unpack_binary_mask(ov_payload, ov_shape)
+        for f_idx, base_mask in pre_overlay_seed_frames.items():
+            if start <= int(f_idx) <= end:
+                edit_bases[int(f_idx)] = np.asarray(base_mask, dtype=np.float32)
+    else:
+        edit_bases = restored
+    return SAM3VideoResult(restored.copy(), edit_bases, anchors, meta)
+
+
 def track_video(
     images: np.ndarray,
     parsed: Mapping[str, Any],
@@ -1152,21 +1453,33 @@ def track_video(
     start, end = _require_range(images, seed, start, end)
     direction = str(direction or "forward")
     prompts = _prompt_events(parsed, seed.frame)
+    frame_overlays = _collect_frame_overlays(parsed, start, end)
+    overlay_digest = _overlay_digest(frame_overlays)
+    effective_seed, pre_overlay_seed_frames, handled_frames = _build_effective_seed(
+        seed, images, frame_overlays
+    )
+    non_seed_overlays = {f: evs for f, evs in frame_overlays.items() if f not in handled_frames}
     source_digest = seed.source_digest
     prompt_digest = seed.prompt_digest
-    cache_key = (source_digest, prompt_digest, int(seed.frame), int(start), int(end), direction, int(seed.object_id))
+    cache_key = (
+        source_digest,
+        prompt_digest,
+        overlay_digest,
+        int(seed.frame),
+        int(start),
+        int(end),
+        direction,
+        int(seed.object_id),
+    )
     global _RAW_CACHE_BYTES, _RAW_CACHE_HITS, _RAW_CACHE_MISSES
     with _CACHE_LOCK:
         cached = _RAW_CACHE.get(cache_key)
         if cached is not None:
             _RAW_CACHE_HITS += 1
             _RAW_CACHE.move_to_end(cache_key)
-            payload, shape, anchors, cached_meta, _item_bytes = cached
-            restored = _unpack_binary_mask(payload, shape)
-            meta = dict(cached_meta)
-            meta["cache_hit"] = True
-            meta.update(sam3_video_cache_info())
-            return SAM3VideoResult(restored.copy(), restored, anchors, meta)
+            return _restore_cached_video_result(
+                cache_key, cached, start=start, end=end, pre_overlay_seed_frames=pre_overlay_seed_frames
+            )
         _RAW_CACHE_MISSES += 1
     with _VIDEO_INFERENCE_LOCK:
         with _CACHE_LOCK:
@@ -1174,46 +1487,56 @@ def track_video(
             if cached is not None:
                 _RAW_CACHE_HITS += 1
                 _RAW_CACHE.move_to_end(cache_key)
-                payload, shape, anchors, cached_meta, _item_bytes = cached
-                restored = _unpack_binary_mask(payload, shape)
-                meta = dict(cached_meta)
-                meta["cache_hit"] = True
-                meta.update(sam3_video_cache_info())
-                return SAM3VideoResult(restored.copy(), restored, anchors, meta)
+                return _restore_cached_video_result(
+                    cache_key, cached, start=start, end=end, pre_overlay_seed_frames=pre_overlay_seed_frames
+                )
         prompt_frames = sorted({
             f for f in (
                 [int(item.get("frame", seed.frame)) for item in prompts]
                 + [int(ref["frame"]) for item in prompts for ref in item.get("refinements", [])]
+                + sorted(non_seed_overlays)
             )
             if int(start) <= f <= int(end)
         }) or [int(seed.frame)]
         min_f, max_f = prompt_frames[0], prompt_frames[-1]
         raw = np.zeros(images.shape[:3], dtype=np.float32)
-        raw[seed.frame] = np.asarray(seed.mask, dtype=np.float32)
+        raw[effective_seed.frame] = np.asarray(effective_seed.mask, dtype=np.float32)
         object_masks_out: dict[int, dict[int, np.ndarray]] = {}
-        try:
+        pre_overlay_bases_out: dict[int, np.ndarray] = {}
+        has_any_seed_fg = bool(np.asarray(effective_seed.mask).any()) or any(
+            bool(np.asarray(obj_m).any()) for _, obj_m in effective_seed.objects
+        )
+        if not has_any_seed_fg and not non_seed_overlays:
+            native = {idx: np.zeros(images.shape[1:3], dtype=bool) for idx in range(start, end + 1)}
+        else:
             try:
-                track_params = inspect.signature(_native_track).parameters
-            except (TypeError, ValueError):
-                track_params = {}
-            if "object_masks_out" in track_params or any(
-                p.kind == inspect.Parameter.VAR_KEYWORD for p in track_params.values()
-            ):
+                try:
+                    track_params = inspect.signature(_native_track).parameters
+                except (TypeError, ValueError):
+                    track_params = {}
+                accepts_var_kw = any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in track_params.values()
+                )
+                extra_kwargs: dict[str, Any] = {}
+                if accepts_var_kw or "object_masks_out" in track_params:
+                    extra_kwargs["object_masks_out"] = object_masks_out
+                if non_seed_overlays and (accepts_var_kw or "frame_overlays" in track_params):
+                    extra_kwargs["frame_overlays"] = non_seed_overlays
+                if non_seed_overlays and (accepts_var_kw or "pre_overlay_bases_out" in track_params):
+                    extra_kwargs["pre_overlay_bases_out"] = pre_overlay_bases_out
                 native = _native_track(
                     images,
                     prompts,
-                    seed=seed,
+                    seed=effective_seed,
                     start=start,
                     end=end,
                     direction=direction,
-                    object_masks_out=object_masks_out,
+                    **extra_kwargs,
                 )
-            else:
-                native = _native_track(images, prompts, seed=seed, start=start, end=end, direction=direction)
-        except SAM3VideoError:
-            raise
-        except Exception as exc:
-            raise SAM3VideoError(f"SAM3 native video propagation failed: {type(exc).__name__}: {exc}") from exc
+            except SAM3VideoError:
+                raise
+            except Exception as exc:
+                raise SAM3VideoError(f"SAM3 native video propagation failed: {type(exc).__name__}: {exc}") from exc
         for index, mask in native.items():
             index = int(index)
             if start <= index <= end:
@@ -1223,23 +1546,40 @@ def track_video(
                 raw[index] = np.clip(value, 0.0, 1.0)
         # Keep the visible seed pixel-identical even when the native stream
         # omits the prompted frame or returns a postprocessed variant.
-        if len(set(seed.object_frames or (seed.frame,))) <= 1 and len(prompt_frames) <= 1:
-            raw[seed.frame] = np.asarray(seed.mask, dtype=np.float32)
+        if len(set(effective_seed.object_frames or (effective_seed.frame,))) <= 1 and len(prompt_frames) <= 1:
+            raw[effective_seed.frame] = np.asarray(effective_seed.mask, dtype=np.float32)
         else:
             seed_entries = [
                 (
-                    int(seed.object_frames[idx]) if idx < len(seed.object_frames) else int(seed.frame),
+                    int(effective_seed.object_frames[idx]) if idx < len(effective_seed.object_frames) else int(effective_seed.frame),
                     obj_mask,
                 )
-                for idx, (_, obj_mask) in enumerate(seed.objects)
-            ] or [(int(seed.frame), seed.mask)]
+                for idx, (_, obj_mask) in enumerate(effective_seed.objects)
+            ] or [(int(effective_seed.frame), effective_seed.mask)]
+            by_frame_union: dict[int, np.ndarray] = {}
             for obj_frame, obj_mask in seed_entries:
                 if start <= obj_frame <= end:
-                    raw[obj_frame] = np.maximum(raw[obj_frame], np.asarray(obj_mask, dtype=np.float32))
-        # Native tracking is the only anchor source.  Browser brush/erase
-        # events are applied by mask_core after this immutable raw result is
-        # cached, so a local edit never becomes a hidden tracker prompt.
-        edit_bases = raw
+                    cur = by_frame_union.get(obj_frame)
+                    arr_obj = np.asarray(obj_mask, dtype=np.float32)
+                    by_frame_union[obj_frame] = arr_obj.copy() if cur is None else np.maximum(cur, arr_obj)
+            for obj_frame, union_mask in by_frame_union.items():
+                if obj_frame in handled_frames:
+                    raw[obj_frame] = union_mask
+                else:
+                    raw[obj_frame] = np.maximum(raw[obj_frame], union_mask)
+        # Browser brush/erase edits have now been propagated through native
+        # tracking; restore pre-overlay edit baselines on edited frames so the
+        # editor can still undo or revise those strokes without double-baking.
+        if frame_overlays:
+            edit_bases = raw.copy()
+            for f_idx, base_mask in pre_overlay_seed_frames.items():
+                if start <= f_idx <= end:
+                    edit_bases[f_idx] = np.asarray(base_mask, dtype=np.float32)
+            for f_idx, base_mask in pre_overlay_bases_out.items():
+                if start <= f_idx <= end:
+                    edit_bases[f_idx] = np.asarray(base_mask, dtype=np.float32)
+        else:
+            edit_bases = raw
         anchors = frozenset(prompt_frames)
         if direction == "forward":
             requested = set(range(min_f, end + 1))
@@ -1283,6 +1623,7 @@ def track_video(
             item_bytes = len(payload)
             if item_bytes <= int(MAX_RAW_CACHE_ITEM_BYTES) and item_bytes <= int(MAX_RAW_CACHE_BYTES):
                 previous = _RAW_CACHE.pop(cache_key, None)
+                _RAW_BASE_OVERRIDES.pop(cache_key, None)
                 if previous is not None:
                     _RAW_CACHE_BYTES = max(0, _RAW_CACHE_BYTES - int(previous[-1]))
                 while _RAW_CACHE and (
@@ -1290,6 +1631,7 @@ def track_video(
                     or _RAW_CACHE_BYTES + item_bytes > int(MAX_RAW_CACHE_BYTES)
                 ):
                     _old_key, old_entry = _RAW_CACHE.popitem(last=False)
+                    _RAW_BASE_OVERRIDES.pop(_old_key, None)
                     _RAW_CACHE_BYTES = max(0, _RAW_CACHE_BYTES - int(old_entry[-1]))
                 if _RAW_CACHE_BYTES + item_bytes <= int(MAX_RAW_CACHE_BYTES):
                     _RAW_CACHE[cache_key] = (payload, shape, anchors, dict(meta), item_bytes)
@@ -1298,6 +1640,12 @@ def track_video(
                     meta["cache_stored"] = True
                     meta.update(sam3_video_cache_info())
                     _RAW_CACHE[cache_key] = (payload, shape, anchors, dict(meta), item_bytes)
+                    if pre_overlay_bases_out:
+                        _RAW_BASE_OVERRIDES[cache_key] = {
+                            int(f_idx): _pack_binary_mask(base_mask)
+                            for f_idx, base_mask in pre_overlay_bases_out.items()
+                            if start <= int(f_idx) <= end
+                        }
         _store_object_track_mask(source_digest, 0, raw)
         if object_masks_out:
             for oid, frame_dict in object_masks_out.items():
@@ -1310,11 +1658,11 @@ def track_video(
                             arr_v = _resize_mask(arr_v, obj_arr.shape[1:])
                         obj_arr[i] = np.clip(arr_v, 0.0, 1.0)
                 idx_0 = int(oid) - 1
-                if 0 <= idx_0 < len(seed.objects):
-                    o_frame = int(seed.object_frames[idx_0]) if idx_0 < len(seed.object_frames) else int(seed.frame)
+                if 0 <= idx_0 < len(effective_seed.objects):
+                    o_frame = int(effective_seed.object_frames[idx_0]) if idx_0 < len(effective_seed.object_frames) else int(effective_seed.frame)
                     if start <= o_frame <= end and o_frame not in frame_dict:
-                        obj_arr[o_frame] = np.maximum(obj_arr[o_frame], np.asarray(seed.objects[idx_0][1], dtype=np.float32))
-                for r_oid, r_frame, r_mask in getattr(seed, "refinement_masks", ()):
+                        obj_arr[o_frame] = np.maximum(obj_arr[o_frame], np.asarray(effective_seed.objects[idx_0][1], dtype=np.float32))
+                for r_oid, r_frame, r_mask in getattr(effective_seed, "refinement_masks", ()):
                     if int(r_oid) == int(oid) and start <= int(r_frame) <= end and int(r_frame) not in frame_dict:
                         obj_arr[int(r_frame)] = np.maximum(obj_arr[int(r_frame)], np.asarray(r_mask, dtype=np.float32))
                 _store_object_track_mask(source_digest, int(oid), obj_arr)

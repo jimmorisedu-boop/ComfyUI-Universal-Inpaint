@@ -260,8 +260,9 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
         range_start = int(start_frame)
         range_end = int(end_frame)
 
+    active_disabled = active_layer is not None and not active_layer.get("enabled", True)
     frame = sam3.get("frame")
-    if sam3.get("action") != "frame" or frame is None or not _prompt_events(layer_doc, frame):
+    if sam3.get("action") != "frame" or frame is None or (not active_disabled and not _prompt_events(layer_doc, frame)):
         return None
     blocker = _execution_blocker(None)
     if blocker is None:
@@ -271,19 +272,30 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
     if not start <= frame <= end:
         return None  # Use the ordinary range validation and recovery path.
 
-    t0 = time.perf_counter()
-    base, seed, sam3_meta = calculate_frame(source, layer_doc, frame=frame, interactive=True)
-    prediction_ms = round((time.perf_counter() - t0) * 1000)
-    base = base.astype(np.float32)
-    sam3["seed_token"] = seed.token
-    if isinstance(parsed.get("sam3"), dict):
-        parsed["sam3"]["seed_token"] = seed.token
+    if active_disabled:
+        base = np.zeros((height, width), dtype=np.float32)
+        seed = None
+        sam3_meta: dict[str, Any] = {}
+        prediction_ms = 0
+    else:
+        t0 = time.perf_counter()
+        base, seed, sam3_meta = calculate_frame(source, layer_doc, frame=frame, interactive=True)
+        prediction_ms = round((time.perf_counter() - t0) * 1000)
+        base = base.astype(np.float32)
+        sam3["seed_token"] = seed.token
+        if isinstance(parsed.get("sam3"), dict):
+            parsed["sam3"]["seed_token"] = seed.token
 
     norm_source = _normalize_images(source)
-    events = _overlay_events(layer_doc, frame)
-    drawn_active = rasterize_events(events, height, width, norm_source[frame], base) if events else base
+    if active_disabled:
+        drawn_active = base
+    else:
+        events = _overlay_events(layer_doc, frame)
+        drawn_active = rasterize_events(events, height, width, norm_source[frame], base) if events else base
 
     layers_preview_meta: list[dict[str, Any]] = []
+    emit_layer_masks = isinstance(parsed.get("layers"), list) and len(parsed["layers"]) > 1
+    layer_raw_frames: dict[str, np.ndarray] = {}
     if isinstance(parsed.get("layers"), list):
         drawn = np.zeros((height, width), dtype=np.float32)
         composite_base = np.zeros((height, width), dtype=np.float32)
@@ -345,6 +357,8 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
                 l_has = bool(np.any(l_raw_frame > 1e-5))
             _apply_layer_blend(drawn, l_raw_frame, layer["blend"])
             _apply_layer_blend(composite_base, l_base_frame, layer["blend"])
+            if emit_layer_masks and l_has:
+                layer_raw_frames[str(layer["id"])] = l_raw_frame
             layers_preview_meta.append({
                 "id": layer["id"],
                 "name": layer["name"],
@@ -370,7 +384,13 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
         "raw_mask": _data_url(_mask_png_payload(drawn, size), "image/png"),
         "edit_base": _data_url(_mask_png_payload(composite_base, size), "image/png"),
     }
-    if seed.objects or getattr(seed, "refinement_masks", ()):
+    if emit_layer_masks:
+        patch["has_layer_masks"] = True
+        patch["layer_masks"] = {
+            layer_id: _data_url(_mask_png_payload(layer_arr, size), "image/png")
+            for layer_id, layer_arr in layer_raw_frames.items()
+        }
+    if seed is not None and (seed.objects or getattr(seed, "refinement_masks", ())):
         from PIL import Image
 
         # Each preview pixel stores up to eight membership bits. This keeps
@@ -413,7 +433,7 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
         "tracking_mode": "sam3",
         "start_frame": start,
         "end_frame": end,
-        "anchors": [frame],
+        "anchors": [frame] if not active_disabled else sorted({a for item in layers_preview_meta for a in item.get("anchors", [])}),
         "has_mask": bool(np.any(mask > 1e-5)),
         "sam3": sam3_meta,
         "frame_preview_ms": prediction_ms,
@@ -425,6 +445,8 @@ def _sam3_frame_preview(source, document, *, fingerprint, fps, grow, feather, st
     if layers_preview_meta:
         meta["layers"] = layers_preview_meta
         meta["active_layer_id"] = str(parsed.get("active_layer_id") or layers_preview_meta[0]["id"])
+    if emit_layer_masks:
+        meta["has_per_layer_masks"] = True
     return {
         "ui": {
             "universal_mask_frame_patch": [patch],
@@ -539,7 +561,7 @@ class THSUniversalMaskEditor:
                     if response is not None:
                         return response
             source = _normalize_images(source)
-            mask, parsed, anchors, edit_bases, sam3_meta, raw_mask, layers_meta = build_mask_sequence(
+            mask, parsed, anchors, edit_bases, sam3_meta, raw_mask, layers_meta, layer_masks = build_mask_sequence(
                 source,
                 mask_data,
                 tracking_mode=tracking_mode,
@@ -552,6 +574,7 @@ class THSUniversalMaskEditor:
                 return_sam3_meta=True,
                 return_raw_mask=True,
                 return_layers_meta=True,
+                return_layer_masks=True,
             )
         except (MaskSourceMismatch, MaskRefinementError, SAM3VideoError) as exc:
             if editor_frame_preview and not isinstance(exc, MaskSourceMismatch):
@@ -592,11 +615,14 @@ class THSUniversalMaskEditor:
             mask,
             edit_bases=edit_bases,
             raw_masks=raw_mask,
+            layer_masks=layer_masks or None,
             source_session=session,
         )
         preview_kwargs: dict[str, Any] = {}
         if not cache_info.get("available"):
             preview_kwargs = {"edit_bases": edit_bases, "raw_masks": raw_mask}
+            if layer_masks:
+                preview_kwargs["layer_masks"] = layer_masks
         previews = encode_preview_assets(source, mask, **preview_kwargs)
         raw_cache_info = raw_tracking_cache_info()
         preview = _preview_tensor(source, mask) if preview_output else _execution_blocker(None)
@@ -638,6 +664,8 @@ class THSUniversalMaskEditor:
         if layers_meta:
             meta["layers"] = layers_meta
             meta["active_layer_id"] = str(parsed.get("active_layer_id") or layers_meta[0]["id"])
+        if layer_masks:
+            meta["has_per_layer_masks"] = True
         untracked_sam3 = False
         if layers_meta and isinstance(parsed.get("layers"), list):
             layer_meta_map = {str(item.get("id")): item for item in layers_meta}
